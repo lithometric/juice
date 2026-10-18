@@ -1,0 +1,14 @@
+{
+  "sources": { "main": "IMG_1957.MOV" },
+  "output": "edit/final.mp4",
+  "shots": [
+    { "source": "main", "start": 23.12, "end": 26.00,
+      "text": { "lines": ["bro this girl in tech", "wants to talk to you"], "x": 0.50, "y": 0.70 } },
+    { "source": "main", "start": 55.64, "end": 58.60,
+      "text": { "lines": ["can we pull her", "SEO analytics?"], "x": 0.68, "y": 0.17 } },
+    { "source": "main", "start": 63.80, "end": 66.10, "punch_in": 0.18 },
+    { "source": "main", "start": 74.55, "end": 75.45 }
+  ],
+  "music": { "file": "music/Ramalama.mp3", "offset": 86.62 },
+  "original_audio": false
+}

@@ -1,0 +1,70 @@
+{
+  "name": "bold",
+  "about": "Punchy broadcast/game look: condensed display type, mono labels, slanted chips, hard block shadows.",
+  "fonts": {
+    "display": {
+      "family": "Anton",
+      "uppercase": true,
+      "tracking": 0.0
+    },
+    "label": {
+      "family": "JetBrains Mono",
+      "weight": 700
+    },
+    "body": {
+      "family": "Inter",
+      "weight": 600
+    }
+  },
+  "colors": {
+    "accent": [
+      217,
+      119,
+      87
+    ],
+    "accent2": [
+      255,
+      214,
+      0
+    ],
+    "danger": [
+      232,
+      52,
+      72
+    ],
+    "ink": [
+      22,
+      22,
+      24
+    ],
+    "paper": [
+      248,
+      246,
+      240
+    ],
+    "muted": [
+      150,
+      150,
+      150
+    ]
+  },
+  "chip": {
+    "skew": -10,
+    "uppercase": true,
+    "tracking": 0.08,
+    "pad_x": 0.55,
+    "pad_y": 0.28
+  },
+  "shadow": {
+    "kind": "hard",
+    "offset": 0.06,
+    "color": "ink"
+  },
+  "outline": 0,
+  "finish": {
+    "grain": 5,
+    "vignette": 0.25,
+    "sharpen": 0.35
+  },
+  "caption_active": "accent2"
+}

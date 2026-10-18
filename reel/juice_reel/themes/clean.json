@@ -1,0 +1,71 @@
+{
+  "name": "clean",
+  "about": "Calm documentary / long-form story look: Inter everywhere, no slant, soft shadows, minimal finish.",
+  "fonts": {
+    "display": {
+      "family": "Inter",
+      "weight": 800,
+      "uppercase": false,
+      "tracking": -0.01
+    },
+    "label": {
+      "family": "Inter",
+      "weight": 600
+    },
+    "body": {
+      "family": "Inter",
+      "weight": 500
+    }
+  },
+  "colors": {
+    "accent": [
+      255,
+      255,
+      255
+    ],
+    "accent2": [
+      255,
+      196,
+      0
+    ],
+    "danger": [
+      230,
+      70,
+      70
+    ],
+    "ink": [
+      12,
+      12,
+      14
+    ],
+    "paper": [
+      255,
+      255,
+      255
+    ],
+    "muted": [
+      190,
+      190,
+      190
+    ]
+  },
+  "chip": {
+    "skew": 0,
+    "uppercase": false,
+    "tracking": 0.0,
+    "pad_x": 0.6,
+    "pad_y": 0.32
+  },
+  "shadow": {
+    "kind": "soft",
+    "offset": 0.05,
+    "color": "ink"
+  },
+  "outline": 0,
+  "finish": {
+    "grain": 0,
+    "vignette": 0.12,
+    "sharpen": 0.2
+  },
+  "caption_active": "accent2"
+}

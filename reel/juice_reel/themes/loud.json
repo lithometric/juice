@@ -1,0 +1,68 @@
+{
+  "name": "loud",
+  "about": "Rage bait / reaction look: huge heavy type with thick outlines, yellow + red, aggressive chips.",
+  "fonts": {
+    "display": {
+      "family": "Archivo Black",
+      "uppercase": true,
+      "tracking": -0.01
+    },
+    "label": {
+      "family": "Archivo Black"
+    },
+    "body": {
+      "family": "Archivo Black"
+    }
+  },
+  "colors": {
+    "accent": [
+      255,
+      221,
+      0
+    ],
+    "accent2": [
+      255,
+      255,
+      255
+    ],
+    "danger": [
+      255,
+      40,
+      40
+    ],
+    "ink": [
+      0,
+      0,
+      0
+    ],
+    "paper": [
+      255,
+      255,
+      255
+    ],
+    "muted": [
+      200,
+      200,
+      200
+    ]
+  },
+  "chip": {
+    "skew": -6,
+    "uppercase": true,
+    "tracking": 0.02,
+    "pad_x": 0.5,
+    "pad_y": 0.25
+  },
+  "shadow": {
+    "kind": "hard",
+    "offset": 0.05,
+    "color": "ink"
+  },
+  "outline": 6,
+  "finish": {
+    "grain": 3,
+    "vignette": 0.3,
+    "sharpen": 0.5
+  },
+  "caption_active": "accent"
+}

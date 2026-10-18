@@ -1,0 +1,28 @@
+[project]
+name = "juice-reel"
+version = "0.1.0"
+description = "Spec-driven short-form video builder (TikTok, Reels, Shorts): one JSON edit file in, a finished vertical video out"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = [
+    "pillow>=10",
+    "requests>=2.31",
+    "numpy>=1.26",
+    "opencv-contrib-python>=4.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+juice-reel = "juice_reel.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["juice_reel*"]
+
+[tool.setuptools.package-data]
+juice_reel = ["style.default.json"]
