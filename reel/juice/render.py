@@ -195,11 +195,27 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline)
     return out, wav, dur
 
 
+def _fix_loudness(out: Path, target: dict, clips: Path) -> None:
+    """Single-pass loudnorm undershoots on dynamic material (speech). Measure the result and, if it's
+    off by more than 0.5 LU, apply the remaining gain under a true-peak limiter (audio only; video copied)."""
+    from .inspect import loudness
+    m = loudness(out)
+    if m["integrated_lufs"] is None or abs(m["integrated_lufs"] - target["I"]) <= 0.5:
+        return
+    gain = target["I"] - m["integrated_lufs"]
+    limit = 10 ** ((target["TP"] - 0.3) / 20)
+    tmp = clips / "loud_fix.mp4"
+    run(["ffmpeg", "-y", "-i", str(out), "-map", "0:v", "-map", "0:a", "-c:v", "copy",
+         "-af", f"volume={gain:.2f}dB,alimiter=limit={limit:.4f}:attack=2:release=50:level=false,aresample=48000",
+         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(tmp)])
+    tmp.replace(out)
+
+
 def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     style = spec.style
     edit = spec.edit_dir
     edit.mkdir(parents=True, exist_ok=True)
-    tag = f"_{spec.format}" if spec.format else ""
+    tag = (f"_{spec.format}" if spec.format else "") + ("_preview" if spec.output.stem.endswith("_preview") else "")
     clips = edit / f"clips{tag}"
     shutil.rmtree(clips, ignore_errors=True)  # only the current edit's shots, never stale ones
     clips.mkdir()
@@ -256,6 +272,8 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(chains),
          "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
          "-t", f"{total}", "-movflags", "+faststart", str(spec.output)])
+
+    _fix_loudness(spec.output, ln, clips)
 
     for f in (vlist, silent, clips / "audio.txt", clips / "audio.wav"):
         f.unlink(missing_ok=True)

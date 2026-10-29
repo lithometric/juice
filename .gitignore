@@ -148,7 +148,7 @@ vite.config.ts.timestamp-*
 # Turbo Repo
 .turbo
 
-# juice-reel
+# juice (python prototype in reel/)
 .env
 .venv/
 __pycache__/

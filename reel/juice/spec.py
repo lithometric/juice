@@ -1,14 +1,18 @@
-"""Load and validate a reel spec (reel.json).
+"""Load and validate a cut spec (reel.json).
 
-A spec is the whole edit of one short-form video (TikTok, Reels, Shorts, ...) as data: which ranges of which sources, in what order,
-with what text, over what music. Every edit is a change to this file followed by
-a re-render, so it is the thing an AI (or a person) actually edits.
+A spec is the whole edit of one video as data: which ranges of which sources, in what order, with
+what text, over what music. Every edit is a change to this file followed by a re-render, so it is
+the thing an AI (or a person) actually edits.
+
+There are two kinds of video, and each can be short or long form:
+  "orientation": "portrait" (1080x1920) | "landscape" (1920x1080)
+  "length":      "short" (stops a scroll: triple hook in 1.5s) | "long" (holds attention)
 
 Paths inside a spec are relative to the spec file.
 
-One spec can render several formats (e.g. vertical 9:16 and horizontal 16:9) from the same
-cuts: `"formats": {"vertical": {"style": {...}}, "horizontal": {"style": {...}}}`. A shot can
-override fields for one format with `"per_format": {"horizontal": {...}}`.
+One spec can render both orientations from the same cuts:
+`"formats": {"portrait": {"style": {...}}, "landscape": {"style": {...}}}`. A shot can override
+fields for one of them with `"per_format": {"landscape": {...}}`.
 """
 from __future__ import annotations
 
@@ -17,6 +21,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_STYLE = Path(__file__).with_name("style.default.json")
+ORIENTATIONS = {"portrait": (1080, 1920), "landscape": (1920, 1080)}
+LENGTHS = ("short", "long")
+# First-generation format names still load.
+ALIASES = {"vertical": "portrait", "horizontal": "landscape"}
 
 
 class SpecError(ValueError):
@@ -70,7 +78,10 @@ class Spec:
     original_audio: bool = False
     style: dict = field(default_factory=dict)
     format: str | None = None
-    tracks: dict | None = None   # output of `juice-reel track`; shots can "follow" its targets
+    orientation: str = "portrait"
+    length: str = "short"
+    brand: dict | None = None    # juice.json brand kit, when the project has one (see brand.py)
+    tracks: dict | None = None   # output of `juice track`; shots can "follow" its targets
     theme: dict = field(default_factory=dict)       # resolved theme (see theme.py)
     overlays: list = field(default_factory=list)    # layers on the output timeline (see timeline.py)
     events: list = field(default_factory=list)      # moments in the source that drive fx/sfx/meters
@@ -83,8 +94,8 @@ class Spec:
 
     @property
     def safe_zone(self) -> dict:
-        """UI-free area for the target platform ("all" = strictest of TikTok, Reels and Shorts)."""
-        return self.style["safe_zones"][self.style["platform"]]
+        """UI-free area for this orientation (portrait = strictest of TikTok, Reels and Shorts)."""
+        return self.style["safe_zones"][self.orientation]
 
     @property
     def fps(self) -> int:
@@ -114,8 +125,10 @@ def _deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
-def load_style(spec_dir: Path, overrides: dict | None) -> dict:
+def load_style(spec_dir: Path, overrides: dict | None, orientation: str = "portrait", length: str = "short") -> dict:
     style = json.loads(DEFAULT_STYLE.read_text())
+    style = _deep_merge(style, style["lengths"][length])
+    style["width"], style["height"] = ORIENTATIONS[orientation]
     # A project-level style.json next to the spec carries the creator's taste across reels.
     project_style = spec_dir / "style.json"
     if project_style.exists():
@@ -126,7 +139,7 @@ def load_style(spec_dir: Path, overrides: dict | None) -> dict:
 def formats(path: str | Path) -> list[str | None]:
     """Format names a spec renders to ([None] for a single-format spec)."""
     raw = json.loads(Path(path).read_text())
-    return list(raw.get("formats", {})) or [None]
+    return [ALIASES.get(k, k) for k in raw.get("formats", {})] or [None]
 
 
 def load(path: str | Path, fmt: str | None = None) -> Spec:
@@ -136,7 +149,11 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
     path = Path(path).resolve()
     raw = json.loads(path.read_text())
     base = path.parent
-    fmts = raw.get("formats", {})
+    fmts = {ALIASES.get(k, k): v for k, v in raw.get("formats", {}).items()}
+    for k in fmts:
+        if k not in ORIENTATIONS:
+            raise SpecError(f"format {k!r} must be portrait or landscape")
+    fmt = ALIASES.get(fmt, fmt)
     if fmt is None and fmts:
         fmt = next(iter(fmts))
     if fmt is not None and fmt not in fmts:
@@ -151,7 +168,8 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
 
     shots = []
     for i, s in enumerate(raw.get("shots", [])):
-        s = {**s, **s.get("per_format", {}).get(fmt, {})} if fmt else s
+        per = {ALIASES.get(k, k): v for k, v in s.get("per_format", {}).items()}
+        s = {**s, **per.get(fmt, {})} if fmt else s
         if s["source"] not in sources:
             raise SpecError(f"shot {i}: unknown source {s['source']!r}")
         if s["end"] <= s["start"]:
@@ -188,12 +206,15 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
         if not music.file.exists():
             raise SpecError(f"music file not found: {music.file}")
 
-    style = load_style(base, raw.get("style"))
+    orientation = fmt or raw.get("orientation", "portrait")
+    length = raw.get("length", "short")
+    if orientation not in ORIENTATIONS:
+        raise SpecError("orientation must be portrait or landscape")
+    if length not in LENGTHS:
+        raise SpecError("length must be short or long")
+    style = load_style(base, raw.get("style"), orientation, length)
     if fmt:
         style = _deep_merge(style, fmts[fmt].get("style", {}))
-    platforms = [k for k in style["safe_zones"] if not k.startswith("_")]
-    if style["platform"] not in platforms:
-        raise SpecError(f"platform must be one of {', '.join(platforms)}")
 
     tracks = None
     if raw.get("tracks"):
@@ -201,6 +222,12 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
     for i, sh in enumerate(shots):
         if sh.follow and (not tracks or sh.follow not in tracks["targets"]):
             raise SpecError(f"shot {i}: follow target {sh.follow!r} not in tracks")
+
+    from . import brand as brand_mod
+    kit = brand_mod.find(raw.get("brand"), base)
+    theme_value = raw.get("theme")
+    if kit:
+        theme_value = brand_mod.theme(kit, theme_value)
 
     output = (base / raw.get("output", "edit/final.mp4")).resolve()
     if fmt:
@@ -212,8 +239,11 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
         shots=shots,
         output=output,
         format=fmt,
+        orientation=orientation,
+        length=length,
+        brand=kit,
         tracks=tracks,
-        theme=theme_mod.load(raw.get("theme"), base),
+        theme=theme_mod.load(theme_value, base),
         overlays=list(raw.get("overlays", [])),
         events=list(raw.get("events", [])),
         meters=dict(raw.get("meters", {})),
@@ -222,3 +252,17 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
         original_audio=bool(raw.get("original_audio", False)),
         style=style,
     )
+
+
+def preview(s: Spec) -> Spec:
+    """The same edit at 480p on the short side and half the frame rate, encoded fast, written next to
+    the real output as *_preview.mp4: for looking at a change in seconds, not for posting."""
+    st = s.style
+    k = 480 / min(st["width"], st["height"])
+    st["width"], st["height"] = round(st["width"] * k / 2) * 2, round(st["height"] * k / 2) * 2
+    st["fps"] = max(12, st["fps"] // 2)
+    st["crf"], st["preset"] = 28, "ultrafast"
+    st["font"] = {**st["font"], "size": round(st["font"]["size"] * k), "line_height": round(st["font"]["line_height"] * k)}
+    st["text_stroke"] = round(st.get("text_stroke", 0) * k)
+    s.output = s.output.with_name(f"{s.output.stem}_preview{s.output.suffix}")
+    return s

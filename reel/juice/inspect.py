@@ -25,7 +25,8 @@ def probe_duration(media: Path, stream: str | None = None) -> float:
     else:
         cmd += ["-show_entries", "format=duration"]
     out = subprocess.run(cmd + ["-of", "csv=p=0", str(media)], capture_output=True, text=True, check=True)
-    return float(out.stdout.strip().splitlines()[0])
+    # Phone footage can add side-data fields ("37.966667,"), so take the first number on the line.
+    return float(out.stdout.strip().splitlines()[0].split(",")[0])
 
 
 def frame_at(media: Path, t: float, width: int, out: Path) -> Path:
@@ -100,6 +101,26 @@ def loudness(media: Path) -> dict:
     return {"integrated_lufs": float(i.group(1)) if i else None, "true_peak_db": float(p.group(1)) if p else None}
 
 
+def footage_problems(spec: Spec) -> list[str]:
+    """Editorial checks on the cut itself: no moment of a clip used twice, and every clip used.
+    A shot marked "replay": true (a deliberate flash-forward/replay) is allowed to repeat footage."""
+    out = []
+    used = {}
+    for i, s in enumerate(spec.shots):
+        if s.replay:
+            continue
+        for j, a, b in used.get(s.source, []):
+            overlap = min(b, s.end) - max(a, s.start)
+            if overlap > 0.05:
+                out.append(f"shots {j} and {i} reuse the same footage ({s.source} {max(a, s.start):.2f}-"
+                           f"{min(b, s.end):.2f}s); cut it once, or mark the repeat \"replay\": true")
+        used.setdefault(s.source, []).append((i, s.start, s.end))
+    unused = [k for k in spec.sources if k not in {s.source for s in spec.shots}]
+    if unused:
+        out.append(f"clips provided but not used: {', '.join(unused)}")
+    return out
+
+
 def check(spec: Spec) -> dict:
     """Verify the rendered output against the spec. Returns a report with any problems."""
     out = spec.output
@@ -109,7 +130,7 @@ def check(spec: Spec) -> dict:
     shutil.rmtree(verify, ignore_errors=True)  # only this render's checks
     verify.mkdir()
 
-    problems = []
+    problems = footage_problems(spec)
     expected = round(spec.duration, 3)
     vdur = probe_duration(out, "v:0")
     adur = probe_duration(out, "a:0")
@@ -125,8 +146,8 @@ def check(spec: Spec) -> dict:
     if loud["true_peak_db"] is not None and loud["true_peak_db"] > -1.0:
         problems.append(f"peak {loud['true_peak_db']} dB is above -1 dB")
 
-    # Text must stay clear of the platform's UI: top bar, bottom caption area, side margins, action buttons.
-    zone, plat = spec.safe_zone, spec.style["platform"]
+    # Text must stay clear of the apps' UI: top bar, bottom caption area, side margins, action buttons.
+    zone, plat = spec.safe_zone, spec.orientation
     for i, s in enumerate(spec.shots):
         if not s.text:
             continue
@@ -138,8 +159,8 @@ def check(spec: Spec) -> dict:
         if b > 1 - zone["bottom"]:
             problems.append(f"shot {i} text is in the bottom caption/UI area "
                             f"({plat}: keep above {1 - zone['bottom']:.2f}, bottom at {b:.2f})")
-        btn = zone["buttons"]
-        if r > btn["left"] and b > btn["top"] and t < btn["bottom"]:
+        btn = zone.get("buttons")
+        if btn and r > btn["left"] and b > btn["top"] and t < btn["bottom"]:
             problems.append(f"shot {i} text overlaps the action buttons on the right ({plat})")
 
     # One frame either side of every cut, side by side, so a flash or jump is visible at a glance.
@@ -160,8 +181,20 @@ def check(spec: Spec) -> dict:
         p.unlink()
     filmstrip(out, 0, max(vdur - 0.05, 0.1), verify / "overview.png", n=min(16, max(4, int(vdur * 1.5))))
 
+    from . import hooks
+    from . import timeline as tlmod
+    from . import retention
+    tl = tlmod.build(spec)
+    hook, hook_probs = hooks.triple_hook(spec, tl, out)
+    problems += hook_probs
+    ret = retention.score(spec, tl)
+    retention.plot(ret, verify / "retention.png", tl)
+    retention.write(ret, verify / "retention.json")
+    ret_summary = {k: ret[k] for k in ("score", "lift_pct", "retention_3s", "retention_end", "expected_watch_s")}
+    ret_summary["tips"] = ret["tips"][:4]
+
     report = {"output": str(out), "video_s": vdur, "audio_s": adur, "expected_s": expected, **loud,
-              "cuts_at": spec.cut_points(), "problems": problems,
-              "look_at": [str(verify / "cuts.jpg"), str(verify / "overview.png")]}
+              "cuts_at": spec.cut_points(), "hook": hook, "retention": ret_summary, "problems": problems,
+              "look_at": [str(verify / "cuts.jpg"), str(verify / "overview.png"), str(verify / "retention.png")]}
     (verify / "report.json").write_text(json.dumps(report, indent=2))
     return report

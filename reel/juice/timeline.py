@@ -122,8 +122,16 @@ def build(spec: Spec) -> Timeline:
             for w in data.get("words", []):
                 if w.get("type") != "word":
                     continue
-                for at in source_to_output(spec, starts, w["start"], key):
-                    words.append({"text": w["text"].strip(), "start": at, "end": at + (w["end"] - w["start"])})
+                # A word belongs to a shot only if most of it is actually heard there: a cut that trims a
+                # filler leaves a few ms of its onset, and that must not put the word on screen.
+                for shot, s0 in zip(spec.shots, starts):
+                    if shot.replay or shot.source != key:
+                        continue
+                    a, b = max(w["start"], shot.start), min(w["end"], shot.end)
+                    if b - a <= 0 or (b - a) < 0.5 * max(1e-3, w["end"] - w["start"]):
+                        continue
+                    at = s0 + (a - shot.start) / shot.speed
+                    words.append({"text": w["text"].strip(), "start": at, "end": at + (b - a) / shot.speed})
         words.sort(key=lambda w: w["start"])
 
     meters = {}

@@ -8,6 +8,9 @@ Every component is `draw(canvas, t, dur, p, ctx)`:
           (absolute output time), ctx.meter(id) (current meter value 0-100), ctx.target(name)
           (tracked box in output pixels, or None when hidden/out of frame), ctx.words (captions)
 
+`"style": {"animate": false}` turns off every text animation (title, chip, captions appear and leave on a
+frame, no pop on the active caption word) for creators who want static type.
+
 Components are genre-neutral. A fight uses versus + meters + slam + callout; a story uses
 lower_third + captions + title; rage bait uses captions(loud) + slam + chip. Colors are theme roles
 ("accent", "ink", "paper", "danger", "accent2") or [r, g, b].
@@ -16,11 +19,14 @@ lower_third + captions + title; rage bait uses captions(loud) + slam + chip. Col
   slam         {text, color="paper", sub?, sub_fill="danger", y=0.42, size=1.0}
                giant word that fills the screen faintly, then snaps to size (FIGHT!, K.O., WAIT...)
   versus       {left, right, left_color="accent", right_color="paper", premise?}
-  title        {text, kicker?, sub?, color="accent", y=0.62, size=1.0}       (WINNER / CLAUDE / STILL STANDING)
+  title        {text | lines[], kicker?, sub?, color="accent", bar="accent2" | false, y=0.62, size=1.0, stagger=0.09}
+               kinetic: lines spring in staggered, accent bar wipes, kicker drops, all slide out
   lower_third  {name, role?, side="left", y=0.78}
-  chip         {text, x=0.5, y=0.5, fill="ink", ink="paper", size=1.0, anchor="center", slide=true}
+  chip         {text, badge?, x=0.5, y=0.5, fill="ink", ink="paper", size=1.0, anchor="center", slide=true}
   caption      {text, y=0.75, size=1.0, color="paper"}                      static subtitle line
-  captions     {y=0.72, size=1.0, max_words=3, active=theme.caption_active, color="paper", uppercase=true}
+  captions     {y=0.72, size=1.0, max_words=3, active=theme.caption_active, color="paper", uppercase=true,
+                box=true, gap=0.18, inactive?}  active word on a rounded accent block; gap in em;
+                inactive = color for the other words of the chunk (karaoke look: box=false, inactive="muted")
   meters       {left: {name, meter, color, label}, right: {...}, counter?: {from=99, rate=1}}
   progress     {y=0.0 | 1.0, color="accent", height=8}                      story progress bar
   callout      {target, text, label?, dx=0.12, dy=-0.18, color="accent"}  circle + leader + label
@@ -57,6 +63,48 @@ def ease_out(t):
 def ease_back(t, s=1.6):
     t = min(max(t, 0.0), 1.0) - 1
     return 1 + (s + 1) * t ** 3 + s * t ** 2
+
+
+def ease_spring(t, s=1.9):
+    """Snappy overshoot (lands past 1 then settles): the feel of a kinetic-type pop, not a fade."""
+    return ease_back(t, s)
+
+
+def ease_expo(t):
+    t = min(max(t, 0.0), 1.0)
+    return 1.0 if t >= 1 else 1 - 2 ** (-10 * t)
+
+
+def animate(ctx) -> bool:
+    """style.animate = false turns every text animation off: things appear and leave on a frame."""
+    sp = getattr(ctx, "spec", None)
+    return True if sp is None else bool(sp.style.get("animate", True))
+
+
+def exit_k(t, dur, d=0.22):
+    """0 -> 1 over the last `d` seconds of a layer, so things leave on purpose instead of vanishing."""
+    return ease_out((t - (dur - d)) / d) if dur > d * 2 else 0.0
+
+
+def _rounded(w: int, h: int, r: int, fill) -> Image.Image:
+    img = Image.new("RGBA", (max(1, w), max(1, h)), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rounded_rectangle([0, 0, w - 1, h - 1], radius=r, fill=fill)
+    return img
+
+
+def _pill(ctx, text, size, fill, ink, role="display"):
+    """A word on a rounded accent block (the active caption word)."""
+    def mk():
+        base = th.headline(ctx.theme, text, size, fill=ink, role=role, shadow="none")
+        f = ctx.theme["fonts"][role]
+        px, py = int(size * 0.22), int(size * 0.02)
+        box = _rounded(base.width - int(size * 0.3) + 2 * px, int(size * 1.18) + 2 * py, int(size * 0.18),
+                       th.color(ctx.theme, fill))
+        out = Image.new("RGBA", (max(box.width, base.width), max(box.height, base.height)), (0, 0, 0, 0))
+        out.alpha_composite(box, ((out.width - box.width) // 2, (out.height - box.height) // 2))
+        out.alpha_composite(base, ((out.width - base.width) // 2, (out.height - base.height) // 2))
+        return out
+    return cached(_key(ctx, "pill", text, int(size), str(fill), str(ink), role), mk)
 
 
 def _key(ctx, *a):
@@ -125,7 +173,7 @@ def versus(c, t, dur, p, ctx):
     if t > 0.3:
         th.paste(c, vs, W / 2, vy, scale=max(0.01, 2.2 - 1.2 * kv))
     if p.get("premise") and t > 0.55:
-        # Typed on, monospace: the rule/stakes of the video.
+        # Typed on: the rule/stakes of the video.
         text = p["premise"]
         n = int(len(text) * min(1, (t - 0.55) / 0.6))
         cursor = "_" if n < len(text) and int(t * 6) % 2 == 0 else ""
@@ -135,22 +183,41 @@ def versus(c, t, dur, p, ctx):
 
 
 def title(c, t, dur, p, ctx):
+    """Kinetic title: each line springs in (staggered), an accent bar wipes under it, the kicker drops
+    in from above, the sub chip rises from below; everything slides out on the last 0.22s."""
     W, H, u = ctx.W, ctx.H, ctx.u
-    y = H * p.get("y", 0.62)
-    big = _headline(ctx, p["text"], 230 * u * p.get("size", 1.0), p.get("color", "accent"),
-                    outline=p.get("outline", max(3, int(6 * u))))
-    s = _fit(big, W * 0.82)
-    k = ease_back(t / 0.3)
-    th.paste(c, big, W / 2, y, scale=s * (0.6 + 0.4 * k), alpha=min(1, t / 0.12))
-    bh = big.height * s
+    lines = [str(x) for x in (p.get("lines") or [p["text"]])]
+    size = 230 * u * p.get("size", 1.0) * (0.72 if len(lines) > 1 else 1.0)
+    col = p.get("color", "accent")
+    imgs = [_headline(ctx, ln, size, col, outline=p.get("outline", max(3, int(6 * u)))) for ln in lines]
+    s = min(_fit(im, W * 0.84) for im in imgs)
+    pitch = max(im.height for im in imgs) * s * 0.74
+    total = pitch * len(lines)
+    A = animate(ctx)
+    out = exit_k(t, dur) if A else 0.0
+    y0 = H * p.get("y", 0.62) - total / 2 + pitch / 2 - out * 60 * u
+    stagger = p.get("stagger", 0.09) if A else 0.0
+    for i, im in enumerate(imgs):
+        k = ease_spring((t - stagger * i) / 0.42) if A else 1.0
+        a = (min(1.0, max(0.0, (t - stagger * i) / 0.08)) if A else 1.0) * (1 - out)
+        th.paste(c, im, W / 2, y0 + i * pitch + (1 - k) * 70 * u, scale=s * (0.66 + 0.34 * k), alpha=a)
+    # accent bar wipes left -> right under the last line
+    kb = ease_expo((t - 0.18 - stagger * (len(lines) - 1)) / 0.45) if A else 1.0
+    bar_w = min(W * 0.5, max(im.width for im in imgs) * s * 0.6) * kb
+    if bar_w > 2 and out < 1 and p.get("bar", "accent2"):
+        by = y0 + (len(lines) - 1) * pitch + pitch * 0.5 + 4 * u
+        bar = _rounded(int(bar_w), int(10 * u), int(5 * u), th.color(ctx.theme, p.get("bar", "accent2")))
+        th.paste(c, bar, W / 2 - (W * 0.5 * (1 - kb)) * 0, by, alpha=1 - out)
     if p.get("kicker"):
-        kk = ease_out((t - 0.12) / 0.25)
-        kc = _chip(ctx, p["kicker"], 38 * u, fill=p.get("color", "accent"), ink="ink")
-        th.paste(c, kc, W / 2, y - bh * 0.42 + (1 - kk) * 16 * u, alpha=kk)
+        kk = ease_spring((t - 0.04) / 0.36) if A else 1.0
+        kc = _chip(ctx, p["kicker"], 38 * u, fill=p.get("kicker_fill", "accent2"), ink="ink")
+        th.paste(c, kc, W / 2, y0 - pitch * 0.5 - 30 * u - (1 - kk) * 60 * u,
+                 alpha=(min(1.0, max(0.0, (t - 0.04) / 0.08)) if A else 1.0) * (1 - out), scale=0.8 + 0.2 * kk)
     if p.get("sub"):
-        ks = ease_out((t - 0.25) / 0.25)
+        ks = ease_spring((t - 0.3 - stagger * (len(lines) - 1)) / 0.36) if A else 1.0
         sc = _chip(ctx, p["sub"], 34 * u, fill="ink", ink="paper")
-        th.paste(c, sc, W / 2, y + bh * 0.42 + (1 - ks) * 16 * u, alpha=ks)
+        th.paste(c, sc, W / 2, y0 + (len(lines) - 0.5) * pitch + 50 * u + (1 - ks) * 40 * u,
+                 alpha=(min(1.0, max(0.0, (t - 0.3) / 0.08)) if A else 1.0) * (1 - out), scale=0.8 + 0.2 * ks)
 
 
 def lower_third(c, t, dur, p, ctx):
@@ -170,10 +237,22 @@ def lower_third(c, t, dur, p, ctx):
 
 
 def chip(c, t, dur, p, ctx):
+    """Label chip that pops in with overshoot (and slides out at the end). `badge` glues a small
+    accent block to its left ("01", "NEW", "?")."""
     W, H, u = ctx.W, ctx.H, ctx.u
-    img = _chip(ctx, p["text"], 34 * u * p.get("size", 1.0), fill=p.get("fill", "ink"), ink=p.get("ink", "paper"))
-    k = ease_out(t / 0.25) if p.get("slide", True) else 1
-    th.paste(c, img, W * p.get("x", 0.5) + (1 - k) * 30 * u, H * p.get("y", 0.5), alpha=k,
+    size = 34 * u * p.get("size", 1.0)
+    img = _chip(ctx, p["text"], size, fill=p.get("fill", "ink"), ink=p.get("ink", "paper"))
+    if p.get("badge"):
+        b = _chip(ctx, str(p["badge"]), size, fill=p.get("badge_fill", "accent2"), ink="ink", role="display")
+        joined = Image.new("RGBA", (img.width + b.width, max(img.height, b.height)), (0, 0, 0, 0))
+        joined.alpha_composite(b, (0, (joined.height - b.height) // 2))
+        joined.alpha_composite(img, (b.width, (joined.height - img.height) // 2))
+        img = joined
+    A = animate(ctx)
+    out = exit_k(t, dur) if A else 0.0
+    k = ease_spring(t / 0.34) if (A and p.get("slide", True)) else 1.0
+    th.paste(c, img, W * p.get("x", 0.5) - (1 - k) * 50 * u, H * p.get("y", 0.5) + out * 30 * u,
+             scale=(0.6 + 0.4 * k) * (1 - 0.1 * out), alpha=(min(1.0, t / 0.06) if A else 1.0) * (1 - out),
              anchor=p.get("anchor", "center"))
 
 
@@ -183,8 +262,24 @@ def caption(c, t, dur, p, ctx):
     th.paste(c, img, W / 2, H * p.get("y", 0.75), scale=_fit(img, W * 0.9))
 
 
+def _caption_chunks(words, m, cuts=()):
+    """For each word index, the (start, end) index range of the chunk it belongs to.
+    A chunk never crosses a cut, a pause > 0.6s, or sentence punctuation."""
+    out, a = [], 0
+    for k, w in enumerate(words):
+        last = k == len(words) - 1
+        ends = w["text"].rstrip()[-1:] in ".?!," if w["text"].strip() else False
+        pause = (not last) and words[k + 1]["start"] - w["end"] > 0.6
+        cut = (not last) and any(w["start"] < c <= words[k + 1]["start"] for c in cuts)
+        if last or ends or pause or cut or (k - a + 1) >= m:
+            out.extend([(a, k + 1)] * (k + 1 - a))
+            a = k + 1
+    return out
+
+
 def captions(c, t, dur, p, ctx):
-    """Word-by-word captions from the transcript: the spoken chunk, active word in the accent color."""
+    """Word-by-word captions from the transcript: the spoken chunk, active word popped on a rounded
+    accent block (`box`, default) or in the accent color (`"box": false`)."""
     W, H, u = ctx.W, ctx.H, ctx.u
     words = ctx.words or []
     now = ctx.t_out
@@ -192,26 +287,41 @@ def captions(c, t, dur, p, ctx):
     if i is None:
         return
     m = p.get("max_words", 3)
-    a = (i // m) * m
-    chunk = words[a:a + m]
+    # Chunks follow the phrasing: break on punctuation or a pause, never mid-phrase just to fill a slot.
+    cuts = tuple(getattr(getattr(ctx, "tl", None), "starts", ())[1:])
+    chunks = cached(("capchunks", id(words), m, cuts), lambda: _caption_chunks(words, m, cuts))
+    a, b = chunks[i]
+    chunk = words[a:b]
     size = 86 * u * p.get("size", 1.0)
     up = p.get("uppercase", True)
-    imgs = []
+    hi = p.get("active") or ctx.theme.get("caption_active", "accent")
+    box = p.get("box", True)
+    role = p.get("role", "display")
+    base, imgs = [], []
     for k, w in enumerate(chunk):
         txt = w["text"].upper() if up else w["text"]
+        plain = _headline(ctx, txt, size, p.get("color", "paper"), role=role)
+        base.append(plain)
         active = (a + k) == i
-        hi = p.get("active") or ctx.theme.get("caption_active", "accent")
-        imgs.append(_headline(ctx, txt, size, hi if active else p.get("color", "paper"),
-                              role=p.get("role", "display")))
-    gap = 18 * u
-    total = sum(im.width for im in imgs) + gap * (len(imgs) - 1)
+        if active and box:
+            imgs.append(_pill(ctx, txt, size, hi, p.get("box_ink", "ink"), role=role))
+        elif active:
+            imgs.append(_headline(ctx, txt, size, hi, role=role))
+        elif p.get("inactive"):     # karaoke: the words not yet / already spoken in a quieter color
+            imgs.append(_headline(ctx, txt, size, p["inactive"], role=role))
+        else:
+            imgs.append(plain)
+    gap = size * p.get("gap", 0.18)
+    total = sum(im.width for im in base) + gap * (len(base) - 1)
     s = _fit(Image.new("RGBA", (int(total), 1)), W * 0.9)
     x = W / 2 - total * s / 2
-    pop = 1 + 0.12 * (1 - ease_out((now - words[i]["start"]) / 0.12))
-    for k, im in enumerate(imgs):
-        sc = s * (pop if (a + k) == i else 1)
-        th.paste(c, im, x + im.width * s / 2, H * p.get("y", 0.72), scale=sc)
-        x += im.width * s + gap * s
+    pop = 1 + 0.16 * (1 - ease_spring((now - words[i]["start"]) / 0.16)) if animate(ctx) else 1.0
+    y = H * p.get("y", 0.72)
+    for k, (im, pl) in enumerate(zip(imgs, base)):
+        active = (a + k) == i
+        sc = s * (pop if active else 1)
+        th.paste(c, im, x + pl.width * s / 2, y, scale=sc)
+        x += pl.width * s + gap * s
 
 
 def meters(c, t, dur, p, ctx):

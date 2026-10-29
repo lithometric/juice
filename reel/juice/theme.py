@@ -11,7 +11,7 @@ A theme has:
   shadow   "hard" (offset block shadow) or "soft" (blurred) for big type
   finish   whole-frame look: grain, vignette, sharpen
 
-Built-in themes live in juice_reel/themes/*.json. A spec picks one with "theme": "bold", points at a
+Built-in themes live in juice/themes/*.json. A spec picks one with "theme": "bold", points at a
 file, or inlines overrides: "theme": {"base": "bold", "colors": {"accent": [0, 200, 255]}}.
 """
 from __future__ import annotations
@@ -31,10 +31,12 @@ FONTS = {
     "Anton": ("anton/Anton-Regular.ttf", "Anton-Regular.ttf"),
     "Bebas Neue": ("bebasneue/BebasNeue-Regular.ttf", "BebasNeue-Regular.ttf"),
     "Archivo Black": ("archivoblack/ArchivoBlack-Regular.ttf", "ArchivoBlack-Regular.ttf"),
-    "JetBrains Mono": ("jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf", "JetBrainsMono[wght].ttf"),
     "Inter": ("inter/Inter%5Bopsz,wght%5D.ttf", "Inter[opsz,wght].ttf"),
+    "Montserrat": ("montserrat/Montserrat%5Bwght%5D.ttf", "Montserrat[wght].ttf"),
 }
 FALLBACK = ("/System/Library/Fonts/HelveticaNeue.ttc", 1)
+# Never monospace: a theme, spec or font file that asks for one gets Inter instead (see fonts.py).
+from .fonts import NO_MONO, is_mono  # noqa: E402
 
 
 def font_path(name: str) -> Path | None:
@@ -54,7 +56,13 @@ def font_path(name: str) -> Path | None:
 
 @lru_cache(maxsize=256)
 def font(name: str, size: int, weight: int | None = None) -> ImageFont.FreeTypeFont:
+    if is_mono(name):
+        name = NO_MONO
     p = font_path(name)
+    if p is None and name not in FONTS:  # any other Google Fonts family (e.g. from a brand kit), static weight
+        from .fonts import static
+        p = static(name, weight or 400)
+        weight = None
     if p is None:  # offline and not cached: still render, in a known face, never a silent default
         return ImageFont.truetype(FALLBACK[0], max(6, size), index=FALLBACK[1])
     f = ImageFont.truetype(str(p), max(6, size))

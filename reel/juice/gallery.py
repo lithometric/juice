@@ -1,6 +1,6 @@
 """Preview every component in a theme on one sheet, without rendering a video.
 
-    juice-reel gallery --theme loud --bg frame.jpg -o gallery.png
+    juice gallery --theme loud --bg frame.jpg -o gallery.png
 
 The quickest way for a human (or the agent) to judge a look before committing to a render.
 """

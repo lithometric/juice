@@ -1,6 +1,6 @@
 {
   "name": "bold",
-  "about": "Punchy broadcast/game look: condensed display type, mono labels, slanted chips, hard block shadows.",
+  "about": "Punchy broadcast/game look: condensed display type, heavy sans labels, slanted chips, hard block shadows.",
   "fonts": {
     "display": {
       "family": "Anton",
@@ -8,8 +8,8 @@
       "tracking": 0.0
     },
     "label": {
-      "family": "JetBrains Mono",
-      "weight": 700
+      "family": "Inter",
+      "weight": 800
     },
     "body": {
       "family": "Inter",

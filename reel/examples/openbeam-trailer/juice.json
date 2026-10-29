@@ -1,0 +1,127 @@
+{
+  "juice": "1",
+  "name": "OpenBeam",
+  "tagline": "world-model physics data",
+  "description": "OpenBeam Cloud runs soft-body physics and records why things move: video, controls and engine data on one clock, driven by AI agents over MCP.",
+  "url": "https://openbeam.world",
+  "handles": {
+    "x": "@openbeamworld",
+    "linkedin": "company/openbeamworld",
+    "youtube": "@openbeamworld",
+    "instagram": "@openbeamworld",
+    "tiktok": "@openbeamworld"
+  },
+  "colors": {
+    "primary": "#F4C31C",
+    "background": "#000000",
+    "surface": "#1A1D1B",
+    "text": "#E8EBE5",
+    "muted": "#A3A3A3"
+  },
+  "fonts": {
+    "display": {
+      "family": "Schibsted Grotesk",
+      "weight": 800
+    },
+    "body": {
+      "family": "Inter"
+    }
+  },
+  "logo": {
+    "mark": "juice-assets/mark.svg",
+    "wordmark": "juice-assets/wordmark.png",
+    "icon": "juice-assets/icon.png"
+  },
+  "images": [
+    "juice-assets/og.png"
+  ],
+  "style": {
+    "mode": "dark"
+  },
+  "sources": {
+    "name": {
+      "from": "https://openbeam.world/#og:site_name",
+      "confidence": 0.85
+    },
+    "tagline": {
+      "from": "https://openbeam.world/#og:title",
+      "confidence": 0.55
+    },
+    "description": {
+      "from": "https://openbeam.world/#og:description",
+      "confidence": 0.7
+    },
+    "url": {
+      "from": "https://openbeam.world/#canonical",
+      "confidence": 0.8
+    },
+    "handles.x": {
+      "from": "https://openbeam.world/#twitter:site",
+      "confidence": 0.8
+    },
+    "handles.linkedin": {
+      "from": "https://openbeam.world/#link:https://www.linkedin.com/company/openbeamworld",
+      "confidence": 0.7
+    },
+    "handles.youtube": {
+      "from": "https://openbeam.world/#link:https://www.youtube.com/@openbeamworld",
+      "confidence": 0.7
+    },
+    "handles.instagram": {
+      "from": "https://openbeam.world/#link:https://www.instagram.com/openbeamworld",
+      "confidence": 0.7
+    },
+    "handles.tiktok": {
+      "from": "https://openbeam.world/#link:https://www.tiktok.com/@openbeamworld",
+      "confidence": 0.7
+    },
+    "colors.primary": {
+      "from": "https://openbeam.world/#--mark",
+      "confidence": 0.68
+    },
+    "colors.background": {
+      "from": "https://openbeam.world/#--background-color",
+      "confidence": 0.75
+    },
+    "colors.surface": {
+      "from": "https://openbeam.world/#--surface @media (prefers-color-scheme: dark)",
+      "confidence": 0.64
+    },
+    "colors.text": {
+      "from": "https://openbeam.world/#--ink @media (prefers-color-scheme: dark)",
+      "confidence": 0.64
+    },
+    "colors.muted": {
+      "from": "https://openbeam.world/assets/built/screen.css?v=xPGozQS2SFMZDlmQ#--color-secondary-text (64% over background)",
+      "confidence": 0.68
+    },
+    "style.mode": {
+      "from": "derived from colors.background",
+      "confidence": 0.68
+    },
+    "fonts.body": {
+      "from": "https://openbeam.world/assets/built/screen.css?v=xPGozQS2SFMZDlmQ#--font-sans",
+      "confidence": 0.7
+    },
+    "fonts.display": {
+      "from": "https://openbeam.world/#css:h1 font-family",
+      "confidence": 0.65
+    },
+    "logo.mark": {
+      "from": "https://openbeam.world/#header logo 2",
+      "confidence": 0.7
+    },
+    "logo.wordmark": {
+      "from": "https://openbeam.world/#header logo",
+      "confidence": 0.75
+    },
+    "logo.icon": {
+      "from": "https://openbeam.world/#icon",
+      "confidence": 0.4
+    },
+    "images": {
+      "from": "https://openbeam.world/#og:image",
+      "confidence": 0.7
+    }
+  }
+}

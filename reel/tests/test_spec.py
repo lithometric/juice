@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from juice_reel import spec, text
+from juice import spec, text
 
 
 @pytest.fixture
@@ -72,24 +72,64 @@ def test_right_aligned_text_ends_at_x(project):
     assert left < right and top < 0.15 < bottom
 
 
-def test_platform_safe_zones(project):
+def test_two_kinds_of_video_each_short_or_long(project):
     s = spec.load(write(project, base()))
-    assert s.style["platform"] == "all"
-    strictest = s.safe_zone
-    for name in ("tiktok", "reels", "shorts"):
-        z = s.style["safe_zones"][name]
-        assert strictest["top"] >= z["top"] and strictest["bottom"] >= z["bottom"]
-    assert spec.load(write(project, base(style={"platform": "shorts"}))).safe_zone["bottom"] == 0.18
+    assert (s.orientation, s.length) == ("portrait", "short")
+    assert (s.style["width"], s.style["height"]) == (1080, 1920)
+    assert s.safe_zone["buttons"]  # portrait keeps clear of the apps' action buttons
+    s = spec.load(write(project, base(orientation="landscape", length="long")))
+    assert (s.style["width"], s.style["height"]) == (1920, 1080)
+    assert s.safe_zone["buttons"] is None
+    assert s.style["hook"]["window"] > 1.5  # long form gets a longer hook window
 
 
-def test_rejects_unknown_platform(project):
-    with pytest.raises(spec.SpecError, match="platform"):
-        spec.load(write(project, base(style={"platform": "myspace"})))
+def test_formats_are_orientations(project):
+    body = base(formats={"portrait": {}, "horizontal": {}})  # old name still loads
+    assert spec.formats(write(project, body)) == ["portrait", "landscape"]
+    s = spec.load(write(project, body), "landscape")
+    assert s.orientation == "landscape" and s.output.name == "final_landscape.mp4"
+    with pytest.raises(spec.SpecError, match="portrait or landscape"):
+        spec.load(write(project, base(formats={"square": {}})))
+    with pytest.raises(spec.SpecError, match="short or long"):
+        spec.load(write(project, base(length="medium")))
+
+
+def test_brand_kit_becomes_the_theme(project):
+    (project / "juice.json").write_text(json.dumps({
+        "juice": "1", "name": "Acme", "colors": {"primary": "#F2C21B", "background": "#06080A"},
+        "fonts": {"display": {"family": "JetBrains Mono", "weight": 900}}, "logo": {"mark": "mark.svg"}}))
+    s = spec.load(write(project, base()))
+    assert s.brand["name"] == "Acme" and s.brand["logo"]["mark"] == str(project / "mark.svg")
+    assert s.theme["colors"]["accent"] == [242, 194, 27] and s.theme["colors"]["ink"] == [6, 8, 10]
+    from juice import theme
+    assert theme.font(s.theme["fonts"]["display"]["family"], 40).getname()[0] != "JetBrains Mono"
 
 
 def test_piecewise_linear_expression_hits_its_points():
-    from juice_reel.render import _pw_linear
+    from juice.render import _pw_linear
     expr = _pw_linear("T", [0.0, 1.0, 2.0], [10.0, 20.0, 0.0]).replace("if(", "iff(")
     funcs = {"lt": lambda a, b: a < b, "iff": lambda c, a, b: a if c else b}
     for t, want in [(0.0, 10.0), (0.5, 15.0), (1.0, 20.0), (1.5, 10.0), (3.0, 0.0)]:
         assert eval(expr.replace("T", repr(t)), funcs) == pytest.approx(want)
+
+
+def test_check_flags_duplicate_footage_and_unused_clips(project):
+    from juice.inspect import footage_problems
+    (project / "other.mov").write_bytes(b"")
+    s = spec.load(write(project, {"sources": {"main": "clip.mov", "spare": "other.mov"},
+                                  "shots": [{"source": "main", "start": 1.0, "end": 3.0},
+                                            {"source": "main", "start": 2.5, "end": 4.0},
+                                            {"source": "main", "start": 1.0, "end": 2.0, "replay": True}]}))
+    probs = footage_problems(s)
+    assert any("reuse the same footage" in p and "shots 0 and 1" in p for p in probs)
+    assert not any("shots 0 and 2" in p or "shots 1 and 2" in p for p in probs)   # replay is allowed
+    assert any("not used: spare" in p for p in probs)
+
+
+def test_monospace_fonts_are_never_used():
+    from juice import theme
+    for name in theme.names():
+        for role, f in theme.load(name)["fonts"].items():
+            assert not theme.is_mono(f["family"]), (name, role, f["family"])
+    assert theme.is_mono("JetBrains Mono") and theme.is_mono("~/fonts/FiraCode-Bold.ttf")
+    assert theme.font("JetBrains Mono", 40).getname() == theme.font("Inter", 40).getname()
