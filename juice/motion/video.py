@@ -33,6 +33,7 @@ import numpy as np
 import skia
 
 from .. import brand as brand_mod
+from .. import encode
 from .core import Ctx, Source, clamp, col, e_in, e_inout, lerp, logo_image, prog
 from .scenes import Piece
 
@@ -152,7 +153,7 @@ class Video:
 
     def beat(self, k: float) -> float:
         """Output time of beat k of the bed (k may be fractional or negative)."""
-        from ..beds import STYLES
+        from ..media.beds import STYLES
         bpm = (self.bed or {}).get("bpm") or STYLES[(self.bed or {}).get("style") or "hype"]["bpm"]
         return self._beat0() + k * 60 / bpm
 
@@ -340,7 +341,8 @@ class Video:
         chunk = max(int(fps * 1.5), math.ceil(n / workers))
         ranges = [(a, min(n, a + chunk)) for a in range(0, n, chunk)]
         tmp = Path(tempfile.mkdtemp(prefix="juice-", dir=out.parent))
-        enc = (["-preset", "ultrafast", "-crf", "28"] if preview else ["-preset", "medium", "-crf", str(crf)])
+        enc = encode.video_args({"bit_depth": 8, "crf": 28, "preset": "ultrafast"} if preview
+                                else {"bit_depth": 10, "crf": crf, "preset": "medium"})
         jobs = [(k, a, b, scale, fps, str(tmp / f"part{k:03d}.mp4"), enc, preview) for k, (a, b) in enumerate(ranges)]
         for s in self.sources():
             s.close()
@@ -356,7 +358,8 @@ class Video:
         t_video = time.time() - t_start
         (tmp / "parts.txt").write_text("".join(f"file '{p}'\n" for p in parts))
         _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(tmp / "parts.txt"), "-i", str(wav),
-              "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "128k" if preview else "256k",
+              "-map", "0:v", "-map", "1:a", *encode.copy_args({"bit_depth": 8 if preview else 10}),
+              "-c:a", "aac", "-b:a", "128k" if preview else "256k",
               "-shortest", "-movflags", "+faststart", str(out)])
         shutil.rmtree(tmp, ignore_errors=True)
         report = {"output": str(out), "preview": preview, "size": [round(self.W * scale), round(self.H * scale)],
@@ -411,7 +414,7 @@ def _render_chunk(job):
     hits = video._all_hits()
     grain = None if preview else [np.random.default_rng(i).normal(0, 4.0, (H, W, 1)).astype(np.int16) for i in range(6)]
     proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
-                             "-r", str(fps), "-i", "-", "-c:v", "libx264", *enc, "-pix_fmt", "yuv420p",
+                             "-r", str(fps), "-i", "-", *enc,
                              "-r", str(fps), "-video_track_timescale", "15360", path], stdin=subprocess.PIPE)
     for fi in range(a, b):
         t = fi / fps

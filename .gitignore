@@ -148,7 +148,7 @@ vite.config.ts.timestamp-*
 # Turbo Repo
 .turbo
 
-# juice (python prototype in reel/)
+# juice (python)
 .env
 .venv/
 __pycache__/
@@ -162,3 +162,5 @@ music/
 *.MOV
 *.mp3
 *.wav
+.ruff_cache/
+agent/

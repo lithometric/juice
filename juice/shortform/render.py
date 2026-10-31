@@ -18,6 +18,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .. import encode
 from . import geom, sfx
 from . import text as textmod
 from . import timeline as tlmod
@@ -158,11 +159,11 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline)
         cmd += ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-r", str(fps), "-i", "pipe:0"]
         graph.append(f"[{k}:v]format=rgba[o{k}];{cur}[o{k}]overlay=0:0:eof_action=repeat[v{k}]")
         cur, k = f"[v{k}]", k + 1
-    post = ",".join(_finish(style, spec.theme, footage=False) + ["format=yuv420p"])
+    post = ",".join(_finish(style, spec.theme, footage=False) + [f"format={encode.pix_fmt(style)}"])
     graph.append(f"{cur}{post}[v]")
     cmd += ["-filter_complex", ";".join(graph), "-map", "[v]",
-            "-an", "-frames:v", str(n), "-c:v", "libx264", "-preset", style.get("preset", "medium"),
-            "-crf", str(style["crf"]), "-r", str(fps), "-video_track_timescale", "15360", str(out)]
+            "-an", "-frames:v", str(n), *encode.video_args(style),
+            "-r", str(fps), "-video_track_timescale", "15360", str(out)]
     if layers:
         ctx = tlmod.Ctx(spec, spec.theme, tl)
         log = clips / f"{i:02d}.log"
@@ -188,24 +189,30 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline)
         live = src_len / shot.speed
         tempo = f"{_atempo(shot.speed)}," if shot.speed != 1 else ""
         # Fade at the cut edges (no pops), pad silence under a freeze, cut to the frame-rounded length.
-        af = (f"{tempo}afade=t=in:st=0:d={e},afade=t=out:st={max(live - e, 0)}:d={e},"
-              f"apad,atrim=0:{dur},asetpts=PTS-STARTPTS,aresample=48000")
-        run(["ffmpeg", "-y", "-ss", f"{shot.start}", "-t", f"{src_len}", "-i", src, "-vn",
+        # The range is trimmed inside the filter, not with an input -t: since ffmpeg 7 an input -t also
+        # ends the filter graph, so apad could never bring the clip up to the video's length and each
+        # shot's audio came out a few hundredths short (22 shots lost 0.17 s against the picture). The pad and
+        # the final trim count samples: a time-based atrim after apad drops the decoder's priming (0.044 s).
+        n = round(dur * 48000)
+        af = (f"aresample=48000,atrim=0:{src_len},asetpts=PTS-STARTPTS,"
+              f"{tempo}afade=t=in:st=0:d={e},afade=t=out:st={max(live - e, 0)}:d={e},"
+              f"apad=whole_len={n},atrim=end_sample={n},asetpts=PTS-STARTPTS")
+        run(["ffmpeg", "-y", "-ss", f"{shot.start}", "-i", src, "-vn",
              "-af", af, "-ac", "2", "-c:a", "pcm_s16le", str(wav)])
     return out, wav, dur
 
 
-def _fix_loudness(out: Path, target: dict, clips: Path) -> None:
+def _fix_loudness(out: Path, target: dict, clips: Path, style: dict) -> None:
     """Single-pass loudnorm undershoots on dynamic material (speech). Measure the result and, if it's
     off by more than 0.5 LU, apply the remaining gain under a true-peak limiter (audio only; video copied)."""
-    from .inspect import loudness
+    from ..media.inspect import loudness
     m = loudness(out)
     if m["integrated_lufs"] is None or abs(m["integrated_lufs"] - target["I"]) <= 0.5:
         return
     gain = target["I"] - m["integrated_lufs"]
     limit = 10 ** ((target["TP"] - 0.3) / 20)
     tmp = clips / "loud_fix.mp4"
-    run(["ffmpeg", "-y", "-i", str(out), "-map", "0:v", "-map", "0:a", "-c:v", "copy",
+    run(["ffmpeg", "-y", "-i", str(out), "-map", "0:v", "-map", "0:a", *encode.copy_args(style),
          "-af", f"volume={gain:.2f}dB,alimiter=limit={limit:.4f}:attack=2:release=50:level=false,aresample=48000",
          "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(tmp)])
     tmp.replace(out)
@@ -229,7 +236,7 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     vlist = clips / "video.txt"
     vlist.write_text("".join(f"file '{p}'\n" for p, _, _ in parts))
     silent = clips / "video.mp4"
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(vlist), "-c", "copy", str(silent)])
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(vlist), *encode.copy_args(style), str(silent)])
 
     inputs = ["-i", str(silent)]
     chains, labels = [], []
@@ -270,10 +277,10 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     chains.append(f"{mix}atrim=0:{total},loudnorm=I={ln['I']}:TP={ln['TP']}:LRA={ln['LRA']},"
                   f"aresample=48000,aformat=channel_layouts=stereo[a]")
     run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(chains),
-         "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+         "-map", "0:v", "-map", "[a]", *encode.copy_args(style), "-c:a", "aac", "-b:a", "192k",
          "-t", f"{total}", "-movflags", "+faststart", str(spec.output)])
 
-    _fix_loudness(spec.output, ln, clips)
+    _fix_loudness(spec.output, ln, clips, style)
 
     for f in (vlist, silent, clips / "audio.txt", clips / "audio.wav"):
         f.unlink(missing_ok=True)

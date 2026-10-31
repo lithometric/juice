@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from juice import beds, render, spec
+from juice.media import beds
+from juice.shortform import render, spec
 from juice.motion import Video, scenes as s
 
 
@@ -169,7 +170,7 @@ def test_future_bed_is_balanced():
 
 @pytest.mark.skipif(shutil.which("uvx") is None, reason="needs uvx for DeepFilterNet")
 def test_isolation_removes_the_room(tmp_path):
-    from juice import isolate
+    from juice.media import isolate
     from juice.motion import mix
     src = tmp_path / "noisy.wav"
     # 1 s of room noise, then a voiced buzz with formants over the same noise.

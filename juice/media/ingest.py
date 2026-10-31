@@ -256,7 +256,7 @@ def _mb(n: float) -> str:
 
 def contact_sheet(clips: list[dict], out: Path) -> Path | None:
     """Every usable video clip as a row of thumbnails under its name, duration and size."""
-    from .theme import font
+    from ..shortform.theme import font
     rows = [c for c in clips if c.get("_thumbs")]
     if not rows:
         return None

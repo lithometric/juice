@@ -223,7 +223,7 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
         if sh.follow and (not tracks or sh.follow not in tracks["targets"]):
             raise SpecError(f"shot {i}: follow target {sh.follow!r} not in tracks")
 
-    from . import brand as brand_mod
+    from .. import brand as brand_mod
     kit = brand_mod.find(raw.get("brand"), base)
     theme_value = raw.get("theme")
     if kit:
@@ -261,7 +261,7 @@ def preview(s: Spec) -> Spec:
     k = 480 / min(st["width"], st["height"])
     st["width"], st["height"] = round(st["width"] * k / 2) * 2, round(st["height"] * k / 2) * 2
     st["fps"] = max(12, st["fps"] // 2)
-    st["crf"], st["preset"] = 28, "ultrafast"
+    st["crf"], st["preset"], st["bit_depth"] = 28, "ultrafast", 8   # 8-bit H.264: a look, not a master
     st["font"] = {**st["font"], "size": round(st["font"]["size"] * k), "line_height": round(st["font"]["line_height"] * k)}
     st["text_stroke"] = round(st.get("text_stroke", 0) * k)
     s.output = s.output.with_name(f"{s.output.stem}_preview{s.output.suffix}")

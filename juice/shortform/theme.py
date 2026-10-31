@@ -36,7 +36,7 @@ FONTS = {
 }
 FALLBACK = ("/System/Library/Fonts/HelveticaNeue.ttc", 1)
 # Never monospace: a theme, spec or font file that asks for one gets Inter instead (see fonts.py).
-from .fonts import NO_MONO, is_mono  # noqa: E402
+from ..fonts import NO_MONO, is_mono  # noqa: E402
 
 
 def font_path(name: str) -> Path | None:
@@ -60,7 +60,7 @@ def font(name: str, size: int, weight: int | None = None) -> ImageFont.FreeTypeF
         name = NO_MONO
     p = font_path(name)
     if p is None and name not in FONTS:  # any other Google Fonts family (e.g. from a brand kit), static weight
-        from .fonts import static
+        from ..fonts import static
         p = static(name, weight or 400)
         weight = None
     if p is None:  # offline and not cached: still render, in a known face, never a silent default
@@ -205,6 +205,10 @@ def headline(theme: dict, text: str, size: float, fill="paper", role: str = "dis
         layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
         draw_text(layer, (pad + off // 2, pad + off), t, f, color(theme, sh.get("color", "ink"), 170), sp)
         img.alpha_composite(layer.filter(ImageFilter.GaussianBlur(max(2, off))))
+    if ol and kind != "hard":  # a plain stroke around the letters (no shadow, or over the soft one)
+        o = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw_text(o, (pad, pad), t, f, color(theme, sh.get("color", "ink")), sp)
+        img.alpha_composite(o.filter(ImageFilter.MaxFilter(int(ol) * 2 + 1)))
     draw_text(img, (pad, pad), t, f, color(theme, fill), sp)
     return img
 

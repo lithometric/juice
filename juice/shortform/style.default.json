@@ -1,6 +1,8 @@
 {
   "fps": 30,
   "crf": 16,
+  "bit_depth": 10,
+  "_encode": "Masters are 10-bit HEVC Main 10 (libx265, hvc1); previews drop to 8-bit H.264. See juice/encode.py.",
   "auto_slowmo": true,
   "animate": true,
   "grade": "eq=contrast=1.06:saturation=1.0,curves=master='0/0 0.25/0.23 0.75/0.77 1/1'",

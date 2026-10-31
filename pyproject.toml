@@ -1,7 +1,7 @@
 [project]
 name = "juice"
-version = "0.1.0"
-description = "AI-driven video builder: portrait or landscape, short or long form; cuts from a JSON spec, motion graphics from a short Python script"
+version = "0.2.0"
+description = "AI-driven video toolkit: short-form cuts from a JSON spec, motion videos from a short script, footage ingest, and an agent harness that edits with any model"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 dependencies = [
@@ -15,16 +15,19 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+mcp = ["mcp>=2"]
 
 [project.scripts]
 juice = "juice.cli:main"
+juice-agent = "harness.cli:main"
+juice-mcp = "harness.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["juice*"]
+include = ["juice*", "harness*"]
 
 [tool.setuptools.package-data]
-juice = ["style.default.json"]
+"juice.shortform" = ["style.default.json", "themes/*.json"]

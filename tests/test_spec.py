@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from juice import spec, text
+from juice.shortform import spec, text
 
 
 @pytest.fixture
@@ -101,12 +101,12 @@ def test_brand_kit_becomes_the_theme(project):
     s = spec.load(write(project, base()))
     assert s.brand["name"] == "Acme" and s.brand["logo"]["mark"] == str(project / "mark.svg")
     assert s.theme["colors"]["accent"] == [242, 194, 27] and s.theme["colors"]["ink"] == [6, 8, 10]
-    from juice import theme
+    from juice.shortform import theme
     assert theme.font(s.theme["fonts"]["display"]["family"], 40).getname()[0] != "JetBrains Mono"
 
 
 def test_piecewise_linear_expression_hits_its_points():
-    from juice.render import _pw_linear
+    from juice.shortform.render import _pw_linear
     expr = _pw_linear("T", [0.0, 1.0, 2.0], [10.0, 20.0, 0.0]).replace("if(", "iff(")
     funcs = {"lt": lambda a, b: a < b, "iff": lambda c, a, b: a if c else b}
     for t, want in [(0.0, 10.0), (0.5, 15.0), (1.0, 20.0), (1.5, 10.0), (3.0, 0.0)]:
@@ -114,7 +114,7 @@ def test_piecewise_linear_expression_hits_its_points():
 
 
 def test_check_flags_duplicate_footage_and_unused_clips(project):
-    from juice.inspect import footage_problems
+    from juice.shortform.check import footage_problems
     (project / "other.mov").write_bytes(b"")
     s = spec.load(write(project, {"sources": {"main": "clip.mov", "spare": "other.mov"},
                                   "shots": [{"source": "main", "start": 1.0, "end": 3.0},
@@ -127,7 +127,7 @@ def test_check_flags_duplicate_footage_and_unused_clips(project):
 
 
 def test_monospace_fonts_are_never_used():
-    from juice import theme
+    from juice.shortform import theme
     for name in theme.names():
         for role, f in theme.load(name)["fonts"].items():
             assert not theme.is_mono(f["family"]), (name, role, f["family"])

@@ -118,10 +118,12 @@ viewers and why (no visual change, dead air, filler, a repeat, slow pace, a weak
   pops, a callout draws. Combine with fast cutting for short-form; rely on it more for long-form.
 - **Annotate what the viewer might miss** with `callout` on a tracked thing; **label effects** (auto
   `SLOW-MO 0.5x`); **pay off the stakes** (`slam` K.O. + sub "X IS DOWN", `title` WINNER / STILL STANDING).
-- **Close with an end card** (brand, line, link, handle) over blurred footage when it's for a brand.
+- **No end card by default.** End on the last shot of footage (a reaction, a walk-away, the product in hand);
+  a title card at the end reads as an ad and costs the last seconds of retention. Add `endcard` only when the
+  creator asks for one.
 - Use **events in source time** for anything tied to the footage (hits, reveals, punchlines), so re-cuts
   never break the sync. Mark hooks/flash-forwards `"replay": true`.
-- Genre sketches: *fight/game* = versus + tags(stat) + meters + slam + callout + title + endcard;
+- Genre sketches: *fight/game* = versus + tags(stat) + meters + slam + callout + title;
   *story* (clean) = captions + question `title` hook + numbered `chip` chapters (`badge`) + slams on key
   words + progress; *rage bait* (loud) = captions (max_words 2-3) + slam on the outrage line + chip
   reactions + fast push-ins.

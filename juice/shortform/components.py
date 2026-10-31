@@ -278,8 +278,10 @@ def _caption_chunks(words, m, cuts=()):
 
 
 def captions(c, t, dur, p, ctx):
-    """Word-by-word captions from the transcript: the spoken chunk, active word popped on a rounded
-    accent block (`box`, default) or in the accent color (`"box": false`)."""
+    """Word-by-word captions from the transcript: the spoken chunk in plain white with a thin black
+    stroke, no colors by default. Opt in to a highlight with `"active": "accent"` (the spoken word in that
+    color) or `"box": true` (the spoken word on a rounded accent block); `size`, `gap` and `stroke` scale
+    the type, the word spacing and the stroke."""
     W, H, u = ctx.W, ctx.H, ctx.u
     words = ctx.words or []
     now = ctx.t_out
@@ -292,36 +294,40 @@ def captions(c, t, dur, p, ctx):
     chunks = cached(("capchunks", id(words), m, cuts), lambda: _caption_chunks(words, m, cuts))
     a, b = chunks[i]
     chunk = words[a:b]
-    size = 86 * u * p.get("size", 1.0)
+    size = 58 * u * p.get("size", 1.0)
     up = p.get("uppercase", True)
-    hi = p.get("active") or ctx.theme.get("caption_active", "accent")
-    box = p.get("box", True)
+    box = p.get("box", False)
+    hi = p.get("active") or (ctx.theme.get("caption_active", "accent") if box else None)
     role = p.get("role", "display")
+    stroke = p.get("stroke", max(1, round(size * 0.035)))
     base, imgs = [], []
     for k, w in enumerate(chunk):
         txt = w["text"].upper() if up else w["text"]
-        plain = _headline(ctx, txt, size, p.get("color", "paper"), role=role)
+        plain = _headline(ctx, txt, size, p.get("color", "paper"), role=role, shadow="none", outline=stroke)
         base.append(plain)
         active = (a + k) == i
         if active and box:
             imgs.append(_pill(ctx, txt, size, hi, p.get("box_ink", "ink"), role=role))
-        elif active:
-            imgs.append(_headline(ctx, txt, size, hi, role=role))
+        elif active and hi:
+            imgs.append(_headline(ctx, txt, size, hi, role=role, shadow="none", outline=stroke))
         elif p.get("inactive"):     # karaoke: the words not yet / already spoken in a quieter color
-            imgs.append(_headline(ctx, txt, size, p["inactive"], role=role))
+            imgs.append(_headline(ctx, txt, size, p["inactive"], role=role, shadow="none", outline=stroke))
         else:
             imgs.append(plain)
-    gap = size * p.get("gap", 0.18)
-    total = sum(im.width for im in base) + gap * (len(base) - 1)
+    # Space words by their glyph widths, not their canvases (every headline carries shadow padding).
+    pad = int(size * 0.3) + int(size * ctx.theme["shadow"].get("offset", 0.06))
+    widths = [max(1, im.width - 2 * pad) for im in base]
+    gap = size * p.get("gap", 0.28)
+    total = sum(widths) + gap * (len(base) - 1)
     s = _fit(Image.new("RGBA", (int(total), 1)), W * 0.9)
     x = W / 2 - total * s / 2
-    pop = 1 + 0.16 * (1 - ease_spring((now - words[i]["start"]) / 0.16)) if animate(ctx) else 1.0
+    pop = 1 + 0.06 * (1 - ease_spring((now - words[i]["start"]) / 0.16)) if animate(ctx) else 1.0
     y = H * p.get("y", 0.72)
-    for k, (im, pl) in enumerate(zip(imgs, base)):
+    for k, (im, wd) in enumerate(zip(imgs, widths)):
         active = (a + k) == i
         sc = s * (pop if active else 1)
-        th.paste(c, im, x + pl.width * s / 2, y, scale=sc)
-        x += pl.width * s + gap * s
+        th.paste(c, im, x + wd * s / 2, y, scale=sc)
+        x += wd * s + gap * s
 
 
 def meters(c, t, dur, p, ctx):

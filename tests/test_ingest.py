@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from juice import ingest, recover
+from juice.media import ingest, recover
 
 # A real macOS screen-recording SPS (Main profile, 2940x1846, cropped, with VUI).
 APPLE_SPS = bytes.fromhex("274d0034ab2805c01d3dcd3501010102")

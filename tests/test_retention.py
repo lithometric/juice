@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from juice import retention, spec, timeline
+from juice.shortform import retention, spec, timeline
 
 
 def make(tmp_path: Path, shots, words=None, **over) -> spec.Spec:

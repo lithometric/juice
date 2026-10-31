@@ -28,7 +28,8 @@ import json
 import sys
 from pathlib import Path
 
-from . import inspect, music, render, spec, transcribe
+from .media import inspect, music, transcribe
+from .shortform import check as checkmod, render, spec
 
 
 def _transcript_for(media: Path) -> Path:
@@ -60,7 +61,7 @@ def cmd_frames(a):
 
 
 def cmd_track(a):
-    from . import track
+    from .shortform import track
     tr = track.track(Path(a.media), json.loads(Path(a.targets).read_text()), a.start, a.end)
     out = Path(a.out)
     out.write_text(json.dumps(tr))
@@ -69,12 +70,12 @@ def cmd_track(a):
 
 
 def cmd_tag(a):
-    from . import track
+    from .shortform import track
     print(track.tag(Path(a.media), json.loads(Path(a.tracks).read_text()), Path(a.out), size=a.size))
 
 
 def cmd_hooks(a):
-    from . import hooks
+    from .shortform import hooks
     clips = [Path(c) for c in a.clips]
     cands = hooks.candidates(clips, top=a.n)
     for i, c in enumerate(cands):
@@ -84,7 +85,7 @@ def cmd_hooks(a):
 
 
 def cmd_gallery(a):
-    from . import gallery
+    from .shortform import gallery
     print(gallery.render(a.theme, Path(a.out), Path(a.bg) if a.bg else None))
 
 
@@ -113,7 +114,7 @@ def cmd_render(a):
 
 
 def cmd_retention(a):
-    from . import retention, timeline as tlmod
+    from .shortform import retention, timeline as tlmod
     for fmt in _formats(a):
         sp = spec.load(a.spec, fmt)
         tl = tlmod.build(sp)
@@ -129,7 +130,7 @@ def cmd_retention(a):
 def cmd_check(a):
     failed = False
     for fmt in _formats(a):
-        report = inspect.check(spec.load(a.spec, fmt))
+        report = checkmod.check(spec.load(a.spec, fmt))
         print(json.dumps(report, indent=2))
         failed |= bool(report["problems"])
     if failed:
@@ -159,7 +160,7 @@ def cmd_motion(a):
 
 
 def cmd_beds(a):
-    from . import beds
+    from .media import beds
     paths = beds.library(Path(a.out).expanduser()) if a.out else beds.library()
     for (name, st), p in zip(beds.STYLES.items(), paths):
         print(f"{name:5s} {st['bpm']} bpm  {st['about']}\n      {p}")
@@ -210,7 +211,7 @@ def main(argv=None):
     p.set_defaults(fn=cmd_motion)
     p = sub.add_parser("beds", help="music bed styles + previews"); p.add_argument("-o", "--out")
     p.set_defaults(fn=cmd_beds)
-    from . import ingest
+    from .media import ingest
     ingest.register(sub)
     p = sub.add_parser("check"); p.add_argument("spec"); p.add_argument("--format")
     p.set_defaults(fn=cmd_check)

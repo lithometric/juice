@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import transcribe
+from ..media import transcribe
 
 FILLERS = {"um", "uh", "umm", "uhh", "okay", "ok", "so", "like", "well", "yeah", "hmm", "mm", "alright", "right"}
 TEXT_COMPS = {"chip", "caption", "slam", "stamp", "title", "versus", "vs", "lower_third", "callout", "captions",

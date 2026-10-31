@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from juice import spec, theme, timeline
+from juice.shortform import spec, theme, timeline
 
 
 def make(tmp_path: Path, **over) -> spec.Spec:
@@ -68,7 +68,7 @@ def test_unknown_component_is_rejected(tmp_path):
 
 
 def test_hook_text_wants_one_short_line(tmp_path):
-    from juice import hooks
+    from juice.shortform import hooks
     cfg = dict(hooks.HOOK_DEFAULTS)
     two = make(tmp_path, overlays=[
         {"type": "chip", "text": "they heard a food question. what we really asked:", "from": 0, "to": 3},
@@ -84,7 +84,7 @@ def test_hook_text_wants_one_short_line(tmp_path):
 
 
 def test_hook_spoken_flags_late_start_and_fillers(tmp_path):
-    from juice import hooks
+    from juice.shortform import hooks
     t = tmp_path / "t.json"
     t.write_text(json.dumps({"words": [{"text": "Okay,", "start": 30.6, "end": 30.75, "type": "word"},
                                        {"text": "two", "start": 30.8, "end": 30.95, "type": "word"}]}))
@@ -96,7 +96,7 @@ def test_hook_spoken_flags_late_start_and_fillers(tmp_path):
 
 
 def test_hook_score_prefers_a_standalone_answer_with_a_laugh():
-    from juice.hooks import score
+    from juice.shortform.hooks import score
     base = dict(dur=1.8, complete=True, filler_start=False, interviewer_question=False, laugh_after=False,
                 reaction_after=False, energy_db=0.0, face=0.05, motion=2.0)
     answer = score({**base, "laugh_after": True, "reaction_after": True})[0]
@@ -107,7 +107,7 @@ def test_hook_score_prefers_a_standalone_answer_with_a_laugh():
 
 
 def test_caption_chunks_break_at_cuts_pauses_and_punctuation():
-    from juice.components import _caption_chunks
+    from juice.shortform.components import _caption_chunks
     words = [{"text": "so", "start": 0.0, "end": 0.2}, {"text": "many", "start": 0.2, "end": 0.4},
              {"text": "people.", "start": 0.4, "end": 0.7}, {"text": "and", "start": 0.75, "end": 0.9},
              {"text": "one", "start": 1.2, "end": 1.4}, {"text": "thing", "start": 1.4, "end": 1.6}]

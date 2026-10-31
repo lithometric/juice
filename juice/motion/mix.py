@@ -16,8 +16,8 @@ from pathlib import Path
 import numpy as np
 from scipy import signal
 
-from .. import beds, isolate
-from ..beds import SR, put
+from ..media import beds, isolate
+from ..media.beds import SR, put
 
 VOICE_FX = ("highpass=f=85,equalizer=f=220:t=q:w=1:g=-2.5,equalizer=f=3200:t=q:w=1.2:g=2.5,"
             "equalizer=f=9000:t=h:w=1:g=1.5,acompressor=threshold=-22dB:ratio=3:attack=6:release=90:makeup=3")
