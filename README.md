@@ -57,7 +57,9 @@ HEVC and ProRes sources (iPhone, most cameras) decode in hardware too, once a on
 the media engine gives the same frames as software. H.264 decodes faster on the CPU's cores, so it goes to the
 media engine only with `--encoder hardware`, and Sony's 4:2:2 10-bit H.264 never does. Anything the
 media engine refuses mid-render is redone in software. `--encoder software` (or `JUICE_ENCODER=software`,
-`JUICE_DECODER=software`) forces the CPU path; see `juice/encode.py`.
+`JUICE_DECODER=software`) forces the CPU path; see `juice/encode.py`. Previews and stills also scale on the media
+engine (masters keep the sharper CPU scale), audio is Apple's AAC encoder, and every file is tagged BT.709 in full
+(primaries, transfer and matrix): with only the matrix tag, Chrome showed brand green #00DD94 as #12F994.
 
 ## The agent
 

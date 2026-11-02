@@ -152,9 +152,11 @@ class Source:
         self.p = None
         self.fps = 30
         self.size = (1280, 720)
+        self.fast = False
 
-    def configure(self, fps: int, size: tuple[int, int]):
-        self.fps, self.size = fps, (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
+    def configure(self, fps: int, size: tuple[int, int], fast: bool = False):
+        """fast: scale on the media engine (previews and stills; softer than the CPU's scale)."""
+        self.fps, self.size, self.fast = fps, (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2), fast
 
     @property
     def duration(self) -> float:
@@ -163,12 +165,14 @@ class Source:
     def _open(self, lt: float):
         s0 = self.start + lt * self.speed
         vf = [f"setpts=(PTS-STARTPTS)/{self.speed}", f"fps={self.fps}"]
+        eng = encode.engine_scale(self.path, *self.size) if self.fast and not self.crop else None
         if self.crop:
             vf.append("crop={2}:{3}:{0}:{1}".format(*self.crop))
-        vf += [f"scale={self.size[0]}:{self.size[1]}:force_original_aspect_ratio=increase:flags=bicubic",
-               f"crop={self.size[0]}:{self.size[1]}", *hdr.filters(self.path), "format=rgba"]
+        vf += eng[1] if eng else [f"scale={self.size[0]}:{self.size[1]}:force_original_aspect_ratio=increase:flags=bicubic"]
+        vf += [f"crop={self.size[0]}:{self.size[1]}", *hdr.filters(self.path), "format=rgba"]
         dur = [] if self.end is None else ["-t", f"{max(0.05, self.end - s0) + 0.2:.3f}"]
-        cmd = ["ffmpeg", "-v", "error", *encode.decode_args(self.path), "-ss", f"{s0:.3f}", *dur, "-i", self.path, "-an",
+        cmd = ["ffmpeg", "-v", "error", *(eng[0] if eng else encode.decode_args(self.path)), "-ss", f"{s0:.3f}", *dur,
+               "-i", self.path, "-an",
                "-vf", ",".join(vf), "-f", "rawvideo", "-"]
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10 ** 7)
         self.t0, self.idx, self.arr, self.img = lt, -1, None, None

@@ -79,13 +79,13 @@ def _finish(style: dict, theme: dict, footage: bool) -> list[str]:
     return out
 
 
-def _video_filters(shot: Shot, spec: Spec, fr: geom.Framing) -> list[str]:
+def _video_filters(shot: Shot, spec: Spec, fr: geom.Framing, scale: list[str] | None = None) -> list[str]:
     style = spec.style
     w, h, fps = style["width"], style["height"], style["fps"]
     live = fr.L
     n = max(1, round(live * fps))
     vf = [f"setpts=(PTS-STARTPTS)/{shot.speed}", f"fps={fps}",
-          f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos"]
+          *(scale or [f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos"])]
     zoom = geom.zoom_range(shot)
     if fr.ts is not None:
         vf.append(f"crop={w}:{h}:x='{_pw_linear('t', fr.ts, fr.x0s)}':y='{fr.y0:.2f}'")
@@ -145,8 +145,10 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline,
     out = clips / f"{i:02d}.mp4"
     fr = geom.Framing(shot, spec)
 
-    cmd = ["ffmpeg", "-y", *encode.decode_args(src, es), "-ss", f"{shot.start}", "-t", f"{src_len}", "-i", src]
-    graph = [f"[0:v]{','.join(_video_filters(shot, spec, fr))}[v0]"]
+    eng = encode.engine_scale(src, W, H, es) if style.get("engine_scale") else None   # previews
+    cmd = ["ffmpeg", "-y", *(eng[0] if eng else encode.decode_args(src, es)),
+           "-ss", f"{shot.start}", "-t", f"{src_len}", "-i", src]
+    graph = [f"[0:v]{','.join(_video_filters(shot, spec, fr, eng[1] if eng else None))}[v0]"]
     cur, k = "[v0]", 1
     if shot.text:
         png = textmod.render_png(shot.text, style, clips / f"{i:02d}_text.png")
@@ -163,7 +165,7 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline,
         cmd += ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-r", str(fps), "-i", "pipe:0"]
         graph.append(f"[{k}:v]format=rgba[o{k}];{cur}[o{k}]overlay=0:0:eof_action=repeat[v{k}]")
         cur, k = f"[v{k}]", k + 1
-    post = ",".join(_finish(style, spec.theme, footage=False) + [f"format={encode.pix_fmt(es)}"])
+    post = ",".join(_finish(style, spec.theme, footage=False) + encode.finish_filters(es))
     graph.append(f"{cur}{post}[v]")
     cmd += ["-filter_complex", ";".join(graph), "-map", "[v]",
             "-an", "-frames:v", str(n), *encode.video_args(es),
@@ -222,7 +224,7 @@ def _fix_loudness(out: Path, target: dict, clips: Path, style: dict) -> None:
     tmp = clips / "loud_fix.mp4"
     run(["ffmpeg", "-y", "-i", str(out), "-map", "0:v", "-map", "0:a", *encode.copy_args(style),
          "-af", f"volume={gain:.2f}dB,alimiter=limit={limit:.4f}:attack=2:release=50:level=false,aresample=48000",
-         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(tmp)])
+         *encode.audio_args("192k"), "-movflags", "+faststart", str(tmp)])
     tmp.replace(out)
 
 
@@ -299,7 +301,7 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     chains.append(f"{mix}atrim=0:{total},loudnorm=I={ln['I']}:TP={ln['TP']}:LRA={ln['LRA']},"
                   f"aresample=48000,aformat=channel_layouts=stereo[a]")
     run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(chains),
-         "-map", "0:v", "-map", "[a]", *encode.copy_args(style), "-c:a", "aac", "-b:a", "192k",
+         "-map", "0:v", "-map", "[a]", *encode.copy_args(style), *encode.audio_args("192k"),
          "-t", f"{total}", "-movflags", "+faststart", str(spec.output)])
 
     _fix_loudness(spec.output, ln, clips, style)

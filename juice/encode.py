@@ -21,7 +21,14 @@ CPU decoding. A hardware encode that fails anyway is redone in software by the c
     enc = video_args(style)      # "-c:v ... -pix_fmt ..." for an encode
     cp = copy_args(style)        # "-c:v copy" (+ the hvc1 tag) when remuxing what video_args produced
     pix = pix_fmt(style)         # the pixel format to end a filter graph on
+    tail = finish_filters(style) # what every encode's filter graph ends with: that format + BT.709 tags
     dec = decode_args(path)      # [] or ["-hwaccel", "videotoolbox"], before "-i path"
+    aud = audio_args("192k")     # AAC: Apple's encoder (aac_at) where there is one, else ffmpeg's
+
+Audio is AAC from Apple's AudioToolbox encoder when ffmpeg has it (macOS): against a lossless source it
+reproduced an isolated voice take 4.9-8.3 dB more faithfully than ffmpeg's built-in encoder at the same
+bitrate (192/256 kb/s), music as well or better (and its 14-20 kHz band 6 dB better at 256 kb/s), in half
+the time. Elsewhere, ffmpeg's encoder.
 
 style keys: bit_depth (10 | 8), encoder (auto | hardware | software), quality (hardware, 1-100),
 crf + preset (software). Env: JUICE_ENCODER and JUICE_DECODER (auto | hardware | software) override.
@@ -60,6 +67,19 @@ def pix_fmt(style: dict) -> str:
     if hardware(style):
         return "p010le" if bits(style) == 10 else "nv12"
     return "yuv420p10le" if bits(style) == 10 else "yuv420p"
+
+
+TAGS = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+
+
+def finish_filters(style: dict, rgb_in: bool = False) -> list[str]:
+    """The end of every encode's filter graph: the encoder's pixel format, then BT.709 tags on the frames.
+    ffmpeg 7+ writes the frames' own colour tags and ignores -color_primaries / -color_trc when they say
+    "unknown", so without this a master said only "bt709 matrix" and every player guessed the rest
+    (QuickTime and Chrome guess differently). rgb_in: the frames are RGB (motion videos), converted here
+    with the BT.709 matrix into limited range."""
+    conv = ["scale=out_color_matrix=bt709:out_range=tv"] if rgb_in else []
+    return [*conv, f"format={pix_fmt(style)}", TAGS]
 
 
 def _mode(style: dict | None, env: str, key: str) -> str:
@@ -114,6 +134,17 @@ def video_args(style: dict) -> list[str]:
         return ["-c:v", "libx265", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p10le",
                 "-tag:v", "hvc1", *COLOR, "-x265-params", "log-level=error"]
     return ["-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p", *COLOR]
+
+
+@lru_cache(maxsize=None)
+def _has_encoder(name: str) -> bool:
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True)
+    return any(ln.split()[1:2] == [name] for ln in r.stdout.splitlines() if ln.strip())
+
+
+def audio_args(bitrate: str) -> list[str]:
+    """AAC at this bitrate: Apple's AudioToolbox encoder where ffmpeg has it, else ffmpeg's own."""
+    return ["-c:a", "aac_at" if _has_encoder("aac_at") else "aac", "-b:a", bitrate]
 
 
 def describe(style: dict) -> str:
@@ -228,6 +259,55 @@ def prepare(paths, style: dict | None = None) -> None:
 @lru_cache(maxsize=256)
 def _decode(path: str, mode: str) -> tuple[str, ...]:
     return ("-hwaccel", "videotoolbox") if _wanted(path, mode) and hardware_decode_ok(path) else ()
+
+
+@lru_cache(maxsize=256)
+def _video(path: str) -> dict:
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=width,height:stream_side_data=rotation", "-of", "json", path], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout)["streams"][0]
+    except (ValueError, KeyError, IndexError):
+        return {}
+
+
+def _dims(path: str) -> tuple[int, int]:
+    v = _video(path)
+    return int(v["width"]), int(v["height"])
+
+
+def _rotation(path: str) -> int:
+    """The display rotation ffprobe reports (-90 for a portrait iPhone clip), 0 if none."""
+    for sd in _video(path).get("side_data_list", []):
+        if "rotation" in sd:
+            return int(float(sd["rotation"]))
+    return 0
+
+
+def engine_scale(path: str | Path, w: int, h: int, style: dict | None = None) -> tuple[list[str], list[str]] | None:
+    """Decode and scale this source to cover w x h on the media engine, for previews and stills:
+    (input options, filters ending in software frames), or None where the CPU path applies.
+
+    Scaling on the engine instead of the CPU takes the CPU cost of decoding and scaling 4K60 iPhone footage
+    from 4.7 to 0.15 CPU-seconds per 4 s of source. Its scaler is softer than lanczos (VMAF 90.5 against
+    it at 1080x1920), so masters keep the CPU scale. The engine doesn't apply the clip's rotation, so it's
+    cleared on input (-display_rotation 0, or the output would carry it and players would turn it again)
+    and done with transpose_vt. Filters that only drop or retime frames (fps, setpts) can come before these."""
+    path = str(path)
+    if not decode_args(path, style):
+        return None
+    rot = -_rotation(path) % 360            # what ffmpeg's autorotate would turn: 90 = clockwise
+    turn = {90: "clock", 270: "cclock", 180: "reversal"}.get(rot)
+    sw, sh = _dims(path)
+    if rot in (90, 270):
+        sw, sh = sh, sw
+    # the size scale=w:h:force_original_aspect_ratio=increase picks, kept even for the 4:2:0 surfaces
+    tw, th = max(w, round(h * sw / sh)), max(h, round(w * sh / sw))
+    tw, th = tw + tw % 2, th + th % 2
+    sw_fmt = "p010le" if "10" in _stream(path)[1] else "nv12"
+    inputs = ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld", "-display_rotation", "0"]
+    filters = ([f"transpose_vt=dir={turn}"] if turn else []) + [f"scale_vt=w={tw}:h={th}", "hwdownload", f"format={sw_fmt}"]
+    return inputs, filters
 
 
 def decode_args(path: str | Path, style: dict | None = None) -> list[str]:

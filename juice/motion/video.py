@@ -325,7 +325,7 @@ class Video:
             aspect = _aspect(s.path, s.crop)
             long_side = max(self.W, self.H) * scale
             size = (long_side, long_side / aspect) if aspect >= 1 else (long_side * aspect, long_side)
-            s.configure(fps, size)
+            s.configure(fps, size, fast=scale < 1)   # previews and stills scale on the media engine
 
     # --- rendering --------------------------------------------------------------------------------
 
@@ -347,7 +347,11 @@ class Video:
                else {"bit_depth": 10, "crf": crf, "preset": "medium"})
         if encoder:
             est["encoder"] = encoder
-        enc = encode.video_args(est)
+
+        def enc_args(st: dict) -> list[str]:   # RGB frames in: BT.709 matrix + tags, then the encoder
+            return ["-vf", ",".join(encode.finish_filters(st, rgb_in=True)), *encode.video_args(st)]
+
+        enc = enc_args(est)
         jobs = [(k, a, b, scale, fps, str(tmp / f"part{k:03d}.mp4"), enc, preview) for k, (a, b) in enumerate(ranges)]
         for s in self.sources():
             s.close()
@@ -370,7 +374,7 @@ class Video:
                 print(f"juice: hardware render failed, redoing it in software: {e}", file=sys.stderr)
         if parts is None:   # every chunk again in software, so the parts still concatenate
             est = encode.software(est)
-            enc = encode.video_args(est)
+            enc = enc_args(est)
             jobs = [(k, a, b, scale, fps, path, enc, preview) for k, a, b, scale, fps, path, _, preview in jobs]
             saved = {k: os.environ.get(k) for k in ("JUICE_ENCODER", "JUICE_DECODER")}
             os.environ.update(JUICE_ENCODER="software", JUICE_DECODER="software")   # the forked readers too
@@ -384,8 +388,8 @@ class Video:
         (tmp / "parts.txt").write_text("".join(f"file '{p}'\n" for p in parts))
         _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(tmp / "parts.txt"), "-i", str(wav),
               "-map", "0:v", "-map", "1:a", *encode.copy_args({"bit_depth": 8 if preview else 10}),
-              "-c:a", "aac", "-b:a", "128k" if preview else "256k",
-              "-shortest", "-movflags", "+faststart", str(out)])
+              *encode.audio_args("128k" if preview else "256k"),
+              "-t", f"{n / fps:.6f}", "-movflags", "+faststart", str(out)])   # every frame (-shortest dropped the last)
         shutil.rmtree(tmp, ignore_errors=True)
         report = {"output": str(out), "preview": preview, "size": [round(self.W * scale), round(self.H * scale)],
                   "fps": fps, "frames": n, "workers": len(jobs), "duration_s": round(self.duration, 3),

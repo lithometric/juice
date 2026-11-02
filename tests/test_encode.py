@@ -153,3 +153,45 @@ def test_no_media_engine_means_software(monkeypatch):
     finally:
         monkeypatch.undo()
         encode.hardware_encoder.cache_clear()
+
+
+@pytest.mark.parametrize("encoder", ["hardware", "software"])
+def test_masters_say_bt709_in_all_three_tags(tmp_path, encoder):
+    """ffmpeg 7+ writes the frames' tags and ignores -color_trc/-color_primaries when they're unknown. Chrome
+    guesses missing tags and showed #00DD94 as #12F994; fully tagged it shows #00DC93."""
+    if encoder == "hardware" and not HW:
+        pytest.skip("no media engine")
+    src = clip(tmp_path / "take.mp4", "-c:v", "libx264", d=3)
+    rep = _video(src).render(tmp_path / "tagged.mp4", workers=2, encoder=encoder)
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=color_range,color_space,color_transfer,color_primaries", "-of", "json",
+                        str(tmp_path / "tagged.mp4")], capture_output=True, text=True)
+    st = json.loads(r.stdout)["streams"][0]
+    assert (st["color_space"], st["color_transfer"], st["color_primaries"], st["color_range"]) == ("bt709",) * 3 + ("tv",)
+    assert frames(tmp_path / "tagged.mp4")[2] == rep["frames"]
+
+
+def test_apple_aac_where_ffmpeg_has_it():
+    a = encode.audio_args("192k")
+    assert a[-2:] == ["-b:a", "192k"] and a[1] in ("aac_at", "aac")
+    if sys.platform == "darwin":
+        assert a[1] == "aac_at"
+
+
+@needs_hw
+def test_engine_scale_turns_a_rotated_clip_upright(tmp_path):
+    """The media engine ignores the rotation flag: engine_scale clears it and transposes, so the picture
+    matches the CPU path's autorotated one and the output carries no rotation."""
+    flat = clip(tmp_path / "flat.mp4", "-c:v", "libx265", "-x265-params", "log-level=error", d=1)
+    rot = tmp_path / "rot.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-display_rotation", "90", "-i", str(flat), "-c", "copy", str(rot)], check=True)
+    inputs, vf = encode.engine_scale(rot, 180, 320)
+    def grab(args, chain):
+        out = subprocess.run(["ffmpeg", "-v", "error", *args, "-i", str(rot), "-frames:v", "1", "-vf",
+                              ",".join(chain + ["crop=180:320", "format=gray"]), "-f", "rawvideo", "-"],
+                             capture_output=True, check=True).stdout
+        return np.frombuffer(out, np.uint8).reshape(320, 180).astype(float)
+    eng = grab(inputs, vf)
+    cpu = grab([], ["scale=180:320:force_original_aspect_ratio=increase"])
+    assert np.abs(eng - cpu).mean() < 6          # same picture, same way up (sideways would be ~40)
+    assert any("transpose_vt" in f for f in vf)

@@ -262,6 +262,7 @@ def preview(s: Spec) -> Spec:
     st["width"], st["height"] = round(st["width"] * k / 2) * 2, round(st["height"] * k / 2) * 2
     st["fps"] = max(12, st["fps"] // 2)
     st["crf"], st["preset"], st["bit_depth"] = 28, "ultrafast", 8   # 8-bit H.264: a look, not a master
+    st["engine_scale"] = True   # sources scaled on the media engine (softer than lanczos; fine for a look)
     st["font"] = {**st["font"], "size": round(st["font"]["size"] * k), "line_height": round(st["font"]["line_height"] * k)}
     st["text_stroke"] = round(st.get("text_stroke", 0) * k)
     s.output = s.output.with_name(f"{s.output.stem}_preview{s.output.suffix}")
