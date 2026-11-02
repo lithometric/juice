@@ -32,7 +32,7 @@ YUNET_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/face_detectio
              "face_detection_yunet_2023mar.onnx")
 YUNET = Path.home() / ".cache" / "juice" / "models" / "face_detection_yunet_2023mar.onnx"
 HOOK_DEFAULTS = {"check": True, "window": 1.5, "speech_by": 0.4, "text_by": 0.5, "max_words": 10,
-                 "require_spoken": "auto"}
+                 "require_spoken": "auto", "require_text": True}
 
 
 def _norm(w: str) -> str:
@@ -243,6 +243,8 @@ def _layer_words(L) -> int:
 def hook_text(spec, tl, cfg: dict) -> tuple[dict, list[str]]:
     """Text hook: something to read by text_by, and short enough to read in one glance."""
     window, by, maxw = cfg["window"], cfg["text_by"], cfg["max_words"]
+    if not cfg["require_text"]:
+        return {"text_at": None, "note": "no text hook expected (the creator asked for no on-screen text)"}, []
     early = [L for L in tl.layers if L.comp in TEXT_COMPS and L.start <= by and L.end > 0]
     shot0 = spec.shots[0].text
     words0 = sum(len(l.split()) for l in shot0.lines) if shot0 else 0

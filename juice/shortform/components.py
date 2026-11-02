@@ -75,10 +75,14 @@ def ease_expo(t):
     return 1.0 if t >= 1 else 1 - 2 ** (-10 * t)
 
 
-def animate(ctx) -> bool:
-    """style.animate = false turns every text animation off: things appear and leave on a frame."""
+def animate(ctx, p: dict | None = None) -> bool:
+    """Text animation (springs, slides, fades, the caption pop) is off by default: captions, chips and
+    titles appear and leave on a frame. Turn it on per layer with "animate": true, or for the whole video
+    with style.animate = true."""
+    if p and "animate" in p:
+        return bool(p["animate"])
     sp = getattr(ctx, "spec", None)
-    return True if sp is None else bool(sp.style.get("animate", True))
+    return False if sp is None else bool(sp.style.get("animate", False))
 
 
 def exit_k(t, dur, d=0.22):
@@ -193,7 +197,7 @@ def title(c, t, dur, p, ctx):
     s = min(_fit(im, W * 0.84) for im in imgs)
     pitch = max(im.height for im in imgs) * s * 0.74
     total = pitch * len(lines)
-    A = animate(ctx)
+    A = animate(ctx, p)
     out = exit_k(t, dur) if A else 0.0
     y0 = H * p.get("y", 0.62) - total / 2 + pitch / 2 - out * 60 * u
     stagger = p.get("stagger", 0.09) if A else 0.0
@@ -248,7 +252,7 @@ def chip(c, t, dur, p, ctx):
         joined.alpha_composite(b, (0, (joined.height - b.height) // 2))
         joined.alpha_composite(img, (b.width, (joined.height - img.height) // 2))
         img = joined
-    A = animate(ctx)
+    A = animate(ctx, p)
     out = exit_k(t, dur) if A else 0.0
     k = ease_spring(t / 0.34) if (A and p.get("slide", True)) else 1.0
     th.paste(c, img, W * p.get("x", 0.5) - (1 - k) * 50 * u, H * p.get("y", 0.5) + out * 30 * u,
@@ -321,7 +325,7 @@ def captions(c, t, dur, p, ctx):
     total = sum(widths) + gap * (len(base) - 1)
     s = _fit(Image.new("RGBA", (int(total), 1)), W * 0.9)
     x = W / 2 - total * s / 2
-    pop = 1 + 0.06 * (1 - ease_spring((now - words[i]["start"]) / 0.16)) if animate(ctx) else 1.0
+    pop = 1 + 0.06 * (1 - ease_spring((now - words[i]["start"]) / 0.16)) if animate(ctx, p) else 1.0
     y = H * p.get("y", 0.72)
     for k, (im, wd) in enumerate(zip(imgs, widths)):
         active = (a + k) == i

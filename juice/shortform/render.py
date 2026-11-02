@@ -18,7 +18,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .. import encode
+from .. import encode, hdr
 from . import geom, sfx
 from . import text as textmod
 from . import timeline as tlmod
@@ -90,6 +90,7 @@ def _video_filters(shot: Shot, spec: Spec, fr: geom.Framing) -> list[str]:
         vf.append(f"crop={w}:{h}:x='{_pw_linear('t', fr.ts, fr.x0s)}':y='{fr.y0:.2f}'")
     else:
         vf.append(f"crop={w}:{h}:x='{_crop_x(shot, live)}':y='(ih-oh)/2'")
+    vf += hdr.filters(spec.sources[shot.source])   # HLG/PQ phone footage -> SDR bt709, on the cropped frame
     if style.get("grade"):
         vf.append(style["grade"])
     if zoom != 1.0:

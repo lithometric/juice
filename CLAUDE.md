@@ -92,7 +92,8 @@ How to get there:
 3. `juice check` runs the triple-hook check (spoken start + filler, text words + timing, frame detail /
    motion / faces) and fails if any of the three is missing. Tune per video with
    `"style": {"hook": {"speech_by": 0.4, "text_by": 0.5, "max_words": 10, "require_spoken": "auto"}}`;
-   music-only edits skip the spoken check automatically.
+   music-only edits skip the spoken check automatically. When the creator asks for no on-screen text
+   (a plain vlog), set `"require_text": false`: the hook is spoken + visual, and stacking them does the work.
 
 ## Retention score (every video)
 
@@ -129,12 +130,14 @@ viewers and why (no visual change, dead air, filler, a repeat, slow pace, a weak
   reactions + fast push-ins.
 - **First-person vlogs get no lower third**: the creator is talking to camera, a name tag reads as a
   third-person interview. Name tags are for other people on screen.
-- Graphics animate with springs and leave on purpose (`title`, `chip`, `captions` pop with overshoot and
-  slide out); plain fades read as cheap.
+- **No text animation by default.** Captions, chips and titles appear and leave on a frame: no fade, slide,
+  spring or pop. Opt in per layer with `"animate": true` only when the creator asks.
+  When they do, `title`, `chip` and `captions` pop with overshoot and slide out; plain fades read as cheap.
 
 ## Workflow
 
-1. **Inventory.** `ffprobe` the source, `juice phrases <video>` for what's said and when, then
+1. **Inventory.** `ffprobe` the source (HLG/PQ phone and gimbal footage is tone-mapped to SDR bt709
+   automatically, in cuts and motion videos alike: `juice/hdr.py`), `juice phrases <video>` for what's said and when, then
    `juice filmstrip <video> <start> <end>` across the whole clip (4 windows) to see who is where.
    For dialogue footage, `juice hooks <clips>` for the hook shortlist.
 2. **Propose** the shot list in plain English (shot → text → music) and wait for a yes.
@@ -161,6 +164,9 @@ viewers and why (no visual change, dead air, filler, a repeat, slow pace, a weak
 - Every shot is rounded to whole frames; cut times in reports are frame-exact.
 
 ## Text rules
+
+- **Captions default:** plain white, thin black stroke, no highlight color and no box on the spoken word,
+  moderate size, normal word spacing. A colored or boxed active word is opt-in (`"active"`, `"box": true`).
 
 - (The SEO reel's caption style) Plain white, Helvetica Neue Bold 54px. **No outline, no fade in/out, no quotes, no emojis.**
   This was one creator's taste for one reel; for new work the theme decides.
