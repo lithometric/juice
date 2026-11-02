@@ -45,7 +45,6 @@ from functools import lru_cache
 from pathlib import Path
 
 COLOR = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]
-HW_QUALITY = {10: 65, 8: 50}       # VideoToolbox -q:v for masters and previews
 CACHE = Path.home() / ".cache" / "juice" / "hwdecode.json"
 # What the media engine decodes reliably. Not 4:2:2 or 10-bit H.264 (Sony XAVC: frames dropped silently).
 HW_DECODE = {"hevc": {"yuv420p", "yuvj420p", "yuv420p10le"}, "prores": None, "h264": {"yuv420p", "yuvj420p"}}
@@ -58,15 +57,36 @@ _lock = threading.Lock()
 
 # --- encode ----------------------------------------------------------------------------------
 
+# style "codec": what a render encodes to. hevc (the default master: 10-bit Main 10), h264 (8-bit: previews, and
+# deliveries to places that want H.264), prores (ProRes 422 HQ, 10-bit 4:2:2 in a .mov with PCM audio: a master
+# to edit). Transparent overlays are ProRes 4444 with alpha (alpha_args). JUICE_CODEC picks one where the style
+# doesn't (the --codec flag sets the style).
+CODECS = ("hevc", "h264", "prores")
+
+
+def codec(style: dict) -> str:
+    c = style.get("codec") or os.environ.get("JUICE_CODEC") or ("hevc" if int(style.get("bit_depth", 10)) == 10 else "h264")
+    if c not in CODECS:
+        raise ValueError(f"codec must be one of {', '.join(CODECS)}, not {c!r}")
+    return c
+
+
 def bits(style: dict) -> int:
-    return int(style.get("bit_depth", 10))
+    return {"hevc": 10, "h264": 8, "prores": 10}[codec(style)]
+
+
+def container(style: dict) -> str:
+    """The file extension a render with this style is written as."""
+    return ".mov" if codec(style) == "prores" else ".mp4"
+
+
+HW_PIX = {"hevc": "p010le", "h264": "nv12", "prores": "p210le"}
+SW_PIX = {"hevc": "yuv420p10le", "h264": "yuv420p", "prores": "yuv422p10le"}
 
 
 def pix_fmt(style: dict) -> str:
     """The format to end a filter graph on: what the chosen encoder takes in, so nothing converts twice."""
-    if hardware(style):
-        return "p010le" if bits(style) == 10 else "nv12"
-    return "yuv420p10le" if bits(style) == 10 else "yuv420p"
+    return (HW_PIX if hardware(style) else SW_PIX)[codec(style)]
 
 
 TAGS = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
@@ -95,16 +115,15 @@ def _mode(style: dict | None, env: str, key: str) -> str:
 
 
 @lru_cache(maxsize=None)
-def hardware_encoder(depth: int) -> str | None:
-    """The VideoToolbox encoder for this bit depth if it really encodes here (one tiny test encode), else None."""
+def hardware_encoder(c: str) -> str | None:
+    """The VideoToolbox encoder for this codec if it really encodes here (one tiny test encode), else None."""
     if sys.platform != "darwin":
         return None
-    name = "hevc_videotoolbox" if depth == 10 else "h264_videotoolbox"
-    test = _vt_args(depth, HW_QUALITY[depth])
+    args = _alpha_hw() if c == "prores4444" else _vt_args(c, HW_QUALITY.get(c, 0))
+    src = "ayuv64le" if c == "prores4444" else HW_PIX[c]
     r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=0.3",
-                        "-vf", "format=" + ("p010le" if depth == 10 else "nv12"), *test, "-f", "null", "-"],
-                       capture_output=True, text=True)
-    return name if r.returncode == 0 else None
+                        "-vf", f"format={src}", *args, "-f", "null", "-"], capture_output=True, text=True)
+    return args[1] if r.returncode == 0 else None
 
 
 def hardware(style: dict) -> bool:
@@ -112,7 +131,7 @@ def hardware(style: dict) -> bool:
     m = _mode(style, "JUICE_ENCODER", "encoder")
     if m == "software":
         return False
-    ok = hardware_encoder(bits(style)) is not None
+    ok = hardware_encoder(codec(style)) is not None
     if m == "hardware" and not ok:
         print("juice: no hardware encoder here, encoding in software", file=sys.stderr)
     return ok
@@ -123,22 +142,49 @@ def software(style: dict) -> dict:
     return {**style, "encoder": "software", "decoder": "software"}
 
 
-def _vt_args(depth: int, quality: int) -> list[str]:
-    if depth == 10:
+HW_QUALITY = {"hevc": 65, "h264": 65}      # VideoToolbox -q:v; previews pass "quality": 50
+
+
+def _vt_args(c: str, quality: int) -> list[str]:
+    if c == "hevc":
         return ["-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-pix_fmt", "p010le", "-q:v", str(quality),
                 "-allow_sw", "0", "-tag:v", "hvc1", *COLOR]
-    return ["-c:v", "h264_videotoolbox", "-profile:v", "high", "-pix_fmt", "nv12", "-q:v", str(quality),
-            "-allow_sw", "0", *COLOR]
+    if c == "h264":
+        return ["-c:v", "h264_videotoolbox", "-profile:v", "high", "-pix_fmt", "nv12", "-q:v", str(quality),
+                "-allow_sw", "0", *COLOR]
+    return ["-c:v", "prores_videotoolbox", "-profile:v", "hq", "-pix_fmt", "p210le", "-allow_sw", "0", *COLOR]
 
 
 def video_args(style: dict) -> list[str]:
+    c = codec(style)
     if hardware(style):
-        return _vt_args(bits(style), int(style.get("quality", HW_QUALITY[bits(style)])))
+        return _vt_args(c, int(style.get("quality", HW_QUALITY.get(c, 0))))
     crf, preset = str(style.get("crf", 16)), style.get("preset", "medium")
-    if bits(style) == 10:
+    if c == "hevc":
         return ["-c:v", "libx265", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p10le",
                 "-tag:v", "hvc1", *COLOR, "-x265-params", "log-level=error"]
-    return ["-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p", *COLOR]
+    if c == "h264":
+        return ["-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p", *COLOR]
+    return ["-c:v", "prores_ks", "-profile:v", "3", "-vendor", "apl0", "-pix_fmt", "yuv422p10le", *COLOR]
+
+
+def _alpha_hw() -> list[str]:
+    return ["-c:v", "prores_videotoolbox", "-profile:v", "4444", "-pix_fmt", "ayuv64le", "-allow_sw", "0", *COLOR]
+
+
+def alpha_args(style: dict | None = None) -> list[str]:
+    """Transparent video (overlays to lay over footage in Resolve or Premiere): ProRes 4444 with its alpha
+    channel, on the media engine where it encodes (it takes 16-bit YUVA), else prores_ks."""
+    style = style or {}
+    if _mode(style, "JUICE_ENCODER", "encoder") != "software" and hardware_encoder("prores4444"):
+        return _alpha_hw()
+    return ["-c:v", "prores_ks", "-profile:v", "4", "-vendor", "apl0", "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", *COLOR]
+
+
+def alpha_filters(style: dict | None = None) -> list[str]:
+    """RGBA frames (straight alpha) into what alpha_args encodes, tagged BT.709 like every master."""
+    fmt = "ayuv64le" if alpha_args(style)[1] == "prores_videotoolbox" else "yuva444p10le"
+    return ["scale=out_color_matrix=bt709:out_range=tv", f"format={fmt}", STRIP, TAGS]
 
 
 @lru_cache(maxsize=None)
@@ -147,8 +193,11 @@ def _has_encoder(name: str) -> bool:
     return any(ln.split()[1:2] == [name] for ln in r.stdout.splitlines() if ln.strip())
 
 
-def audio_args(bitrate: str) -> list[str]:
-    """AAC at this bitrate: Apple's AudioToolbox encoder where ffmpeg has it, else ffmpeg's own."""
+def audio_args(bitrate: str, style: dict | None = None) -> list[str]:
+    """AAC at this bitrate: Apple's AudioToolbox encoder where ffmpeg has it, else ffmpeg's own. A ProRes
+    master gets 24-bit PCM instead, as edit masters do."""
+    if style is not None and codec(style) == "prores":
+        return ["-c:a", "pcm_s24le"]
     return ["-c:a", "aac_at" if _has_encoder("aac_at") else "aac", "-b:a", bitrate]
 
 
@@ -158,7 +207,7 @@ def describe(style: dict) -> str:
 
 
 def copy_args(style: dict) -> list[str]:
-    return ["-c:v", "copy"] + (["-tag:v", "hvc1"] if bits(style) == 10 else [])
+    return ["-c:v", "copy"] + (["-tag:v", "hvc1"] if codec(style) == "hevc" else [])
 
 
 # --- decode ----------------------------------------------------------------------------------
@@ -391,7 +440,12 @@ def color_report(path: str | Path) -> dict:
     for sd in st.get("side_data_list", []) + first:
         kind = sd.get("side_data_type", "").lower()
         extra += [v for k, v in names.items() if k in kind]
-    bits = "10-bit" if "10" in st.get("pix_fmt", "") else "8-bit"
+    import re
+    pix = st.get("pix_fmt", "")
+    depth = re.search(r"p(\d+)", pix)
+    bits = f"{depth.group(1)}-bit" if depth and depth.group(1) in ("10", "12", "16") else "8-bit"
+    if pix.startswith(("yuva", "ayuv", "gbrap", "rgba", "bgra")):
+        bits += " with alpha"
     codec = {"hevc": "HEVC", "h264": "H.264", "prores": "ProRes"}.get(st.get("codec_name", ""), st.get("codec_name", "?"))
     if colr is None:
         problems.append("no colr box: the file doesn't say its colour space, so each player guesses (Chrome shifted brand colours)")

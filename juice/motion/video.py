@@ -204,11 +204,20 @@ class Video:
                 chroma = max(chroma, ca * h.amount * (1 - abs(dt) / 0.13))
         return flash, shake, chroma
 
-    def draw(self, surf: skia.Surface, ctx: Ctx, t: float, hits: list[Hit], grain=None, fi=0) -> np.ndarray:
+    def draw(self, surf: skia.Surface, ctx: Ctx, t: float, hits: list[Hit], grain=None, fi=0, alpha=False) -> np.ndarray:
+        """One frame as RGB; alpha=True: only the overlays, on transparent, as straight-alpha RGBA."""
         c = surf.getCanvas()
         c.save()
         c.scale(ctx.scale, ctx.scale)
-        c.clear(ctx.c("ink"))
+        c.clear(skia.ColorTRANSPARENT if alpha else ctx.c("ink"))
+        if alpha:
+            for p in self.overlays:
+                if p.start - 1e-6 <= t < p.end:
+                    c.save()
+                    p.piece.draw(c, ctx, t - p.start, p.end - p.start, t)
+                    c.restore()
+            c.restore()
+            return np.ascontiguousarray(surf.toarray(colorType=skia.kRGBA_8888_ColorType, alphaType=skia.kUnpremul_AlphaType))
         flash, shake, chroma = self._post_amounts(t, hits)
         c.save()
         if shake > 0:
@@ -329,9 +338,12 @@ class Video:
 
     # --- rendering --------------------------------------------------------------------------------
 
-    def render(self, out, preview=False, workers=None, crf=16, encoder=None) -> dict:
+    def render(self, out, preview=False, workers=None, crf=16, encoder=None, codec=None, overlays=False) -> dict:
         """Render to out (mp4). preview = 480p on the short side at half the frame rate, fast encode.
         encoder: auto | hardware | software (default: the media engine where there is one, see encode.py).
+        codec: hevc (default) | h264 | prores (a ProRes 422 HQ .mov with PCM audio); previews are H.264.
+        overlays: only the overlays (headlines, slams, captions, chips...) on a transparent background, as a
+        ProRes 4444 .mov with alpha and no audio, to lay over the footage in an editor.
         Returns timings and paths."""
         t_start = time.time()
         out = Path(out).expanduser().resolve()
@@ -343,16 +355,22 @@ class Video:
         chunk = max(int(fps * 1.5), math.ceil(n / workers))
         ranges = [(a, min(n, a + chunk)) for a in range(0, n, chunk)]
         tmp = Path(tempfile.mkdtemp(prefix="juice-", dir=out.parent))
-        est = ({"bit_depth": 8, "crf": 28, "preset": "ultrafast"} if preview
-               else {"bit_depth": 10, "crf": crf, "preset": "medium"})
+        est = ({"codec": "h264", "crf": 28, "preset": "ultrafast", "quality": 50} if preview
+               else {"codec": codec or "hevc", "crf": crf, "preset": "medium"})
         if encoder:
             est["encoder"] = encoder
 
-        def enc_args(st: dict) -> list[str]:   # RGB frames in: BT.709 matrix + tags, then the encoder
+        def enc_args(st: dict) -> list[str]:   # RGB(A) frames in: BT.709 matrix + tags, then the encoder
+            if overlays:
+                return ["-vf", ",".join(encode.alpha_filters(st)), *encode.alpha_args(st)]
             return ["-vf", ",".join(encode.finish_filters(st, rgb_in=True)), *encode.video_args(st)]
 
         enc = enc_args(est)
-        jobs = [(k, a, b, scale, fps, str(tmp / f"part{k:03d}.mp4"), enc, preview) for k, (a, b) in enumerate(ranges)]
+        ext = ".mov" if overlays else encode.container(est)
+        if out.suffix != ext:                       # ProRes (a master or overlays) is a .mov
+            out = out.with_suffix(ext)
+        jobs = [(k, a, b, scale, fps, str(tmp / f"part{k:03d}{ext}"), enc, preview, overlays)
+                for k, (a, b) in enumerate(ranges)]
         for s in self.sources():
             s.close()
         encode.prepare(s.path for s in self.sources())   # each file's hardware decode, checked once
@@ -364,7 +382,7 @@ class Video:
         ctx = mp.get_context("fork")
         with ctx.Pool(len(jobs)) as pool:
             pending = pool.map_async(_render_chunk, jobs)
-            wav = self.render_audio(tmp / "mix.wav", preview=preview)
+            wav = None if overlays else self.render_audio(tmp / "mix.wav", preview=preview)
             try:
                 parts = pending.get()
             except (RuntimeError, OSError) as e:   # an encode that failed, or a pipe it closed early
@@ -375,7 +393,7 @@ class Video:
         if parts is None:   # every chunk again in software, so the parts still concatenate
             est = encode.software(est)
             enc = enc_args(est)
-            jobs = [(k, a, b, scale, fps, path, enc, preview) for k, a, b, scale, fps, path, _, preview in jobs]
+            jobs = [(k, a, b, scale, fps, path, enc, preview, alpha) for k, a, b, scale, fps, path, _, preview, alpha in jobs]
             saved = {k: os.environ.get(k) for k in ("JUICE_ENCODER", "JUICE_DECODER")}
             os.environ.update(JUICE_ENCODER="software", JUICE_DECODER="software")   # the forked readers too
             try:
@@ -386,14 +404,19 @@ class Video:
                     os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
         t_video = time.time() - t_start
         (tmp / "parts.txt").write_text("".join(f"file '{p}'\n" for p in parts))
-        _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(tmp / "parts.txt"), "-i", str(wav),
-              "-map", "0:v", "-map", "1:a", *encode.copy_args({"bit_depth": 8 if preview else 10}),
-              *encode.audio_args("128k" if preview else "256k"),
-              "-t", f"{n / fps:.6f}", "-movflags", "+faststart", str(out)])   # every frame (-shortest dropped the last)
+        if overlays:
+            _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(tmp / "parts.txt"),
+                  "-c:v", "copy", "-movflags", "+faststart", str(out)])
+        else:
+            _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(tmp / "parts.txt"), "-i", str(wav),
+                  "-map", "0:v", "-map", "1:a", *encode.copy_args(est),
+                  *encode.audio_args("128k" if preview else "256k", est),
+                  "-t", f"{n / fps:.6f}", "-movflags", "+faststart", str(out)])   # every frame (-shortest dropped the last)
         shutil.rmtree(tmp, ignore_errors=True)
         report = {"output": str(out), "preview": preview, "size": [round(self.W * scale), round(self.H * scale)],
                   "fps": fps, "frames": n, "workers": len(jobs), "duration_s": round(self.duration, 3),
-                  "encoder": encode.describe(est), "color": encode.color_report(out)["summary"],
+                  "encoder": encode.alpha_args(est)[1] if overlays else encode.describe(est),
+                  "color": encode.color_report(out)["summary"],
                   "render_s": round(time.time() - t_start, 1), "video_s": round(t_video, 1),
                   "audio": getattr(self, "audio_report", None)}
         return report
@@ -451,20 +474,21 @@ def _fork_safe():
 
 def _render_chunk(job):
     """One process: frames a..b of the video, encoded on their own (concatenated afterwards)."""
-    k, a, b, scale, fps, path, enc, preview = job
+    k, a, b, scale, fps, path, enc, preview, alpha = job
     video = _JOB
     video._configure(scale, fps)
     W, H = round(video.W * scale) // 2 * 2, round(video.H * scale) // 2 * 2
     surf = skia.Surface(W, H)
     ctx = video._ctx(scale)
     hits = video._all_hits()
-    grain = None if preview else [np.random.default_rng(i).normal(0, 4.0, (H, W, 1)).astype(np.int16) for i in range(6)]
-    proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
+    grain = None if preview or alpha else [np.random.default_rng(i).normal(0, 4.0, (H, W, 1)).astype(np.int16) for i in range(6)]
+    proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgba" if alpha else "rgb24",
+                             "-s", f"{W}x{H}",
                              "-r", str(fps), "-i", "-", *enc,
                              "-r", str(fps), "-video_track_timescale", "15360", path], stdin=subprocess.PIPE)
     for fi in range(a, b):
         t = fi / fps
-        proc.stdin.write(video.draw(surf, ctx, t, hits, grain, fi)[:H, :W].tobytes())
+        proc.stdin.write(video.draw(surf, ctx, t, hits, grain, fi, alpha=alpha)[:H, :W].tobytes())
         for p in video.scenes + video.overlays:
             if p.end < t - 0.5:
                 for s in p.piece.sources():

@@ -13,7 +13,7 @@ from juice.motion import Video, scenes as s
 
 def probe(path):
     r = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
-                        "stream=codec_type,width,height,nb_read_frames:format=duration", "-of", "json", str(path)],
+                        "stream=codec_type,codec_name,pix_fmt,width,height,nb_read_frames:format=duration", "-of", "json", str(path)],
                        capture_output=True, text=True)
     return json.loads(r.stdout)
 
@@ -184,3 +184,62 @@ def test_isolation_removes_the_room(tmp_path):
     noise = lambda a: 20 * np.log10(np.sqrt((a[int(0.2 * 48000):int(0.9 * 48000)] ** 2).mean()) + 1e-9)
     assert noise(y) < noise(x) - 10 and abs(len(x) - len(y)) < 4800   # 10-15 dB between words on the OpenBeam takes
     assert isolate.voices([src])[src] == out   # cached
+
+
+def _cut(footage, tmp_path):
+    (tmp_path / "take.mp4").symlink_to(footage / "take.mp4")
+    (tmp_path / "reel.json").write_text(json.dumps({
+        "sources": {"a": "take.mp4"}, "original_audio": True, "orientation": "landscape",
+        "shots": [{"source": "a", "start": 0, "end": 1.5, "fx": [{"type": "chip", "text": "HELLO"}],
+                   "text": {"lines": ["a line"]}},
+                  {"source": "a", "start": 2, "end": 3.5}]}))
+    return tmp_path / "reel.json"
+
+
+def test_cut_as_a_prores_master_with_audio_exactly_as_long(footage, tmp_path):
+    from juice.shortform import check
+    reel = _cut(footage, tmp_path)
+    sp = spec.load(reel)
+    sp.style["codec"] = "prores"
+    rep = render.render(sp)
+    out = Path(rep["output"])
+    assert out.suffix == ".mov" and rep["color"].startswith("Rec.709 SDR (1-1-1)")
+    st = {x["codec_type"]: x for x in probe(out)["streams"]}
+    assert st["video"]["codec_name"] == "prores" and st["audio"]["codec_name"] == "pcm_s24le"
+    frames = int(st["video"]["nb_read_frames"])
+    # the mix used to come out short of the picture (hidden by AAC's padding); PCM shows the exact length
+    samples = int(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=nb_frames",
+                                  "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.strip())
+    assert samples == round(frames / 30 * 48000)
+    assert check.check(spec.load(reel))["problems"] == []          # check finds the newer .mov
+
+
+def test_cut_overlays_are_transparent_prores_on_the_edit_timeline(footage, tmp_path):
+    from juice.shortform import overlays
+    rep = overlays.render(spec.load(_cut(footage, tmp_path)))
+    v = next(x for x in probe(rep["output"])["streams"] if x["codec_type"] == "video")
+    assert v["codec_name"] == "prores" and v["pix_fmt"].startswith("yuva") and int(v["nb_read_frames"]) == rep["frames"] == 90
+    assert "chip" in rep["layers"] and "shot text" in rep["layers"]
+    a = subprocess.run(["ffmpeg", "-v", "error", "-ss", "0.5", "-i", rep["output"], "-frames:v", "1", "-vf",
+                        "format=rgba,alphaextract", "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
+    alpha = np.frombuffer(a, np.uint8)
+    assert (alpha == 0).mean() > 0.5 and (alpha == 255).any()      # mostly see-through, the graphics opaque
+
+
+def test_motion_overlays_only(footage, tmp_path):
+    v = build_clean(footage, "landscape")
+    rep = v.render(tmp_path / "ov.mp4", overlays=True, workers=2)
+    out = Path(rep["output"])
+    st = probe(out)["streams"]
+    assert out.suffix == ".mov" and [x["codec_type"] for x in st] == ["video"]
+    assert st[0]["codec_name"] == "prores" and int(st[0]["nb_read_frames"]) == rep["frames"]
+    a = subprocess.run(["ffmpeg", "-v", "error", "-ss", "0.5", "-i", str(out), "-frames:v", "1", "-vf",
+                        "format=rgba,alphaextract", "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
+    alpha = np.frombuffer(a, np.uint8)
+    assert (alpha == 0).any() and (alpha > 200).any()               # the title is there, the scene isn't
+
+
+def test_h264_delivery_master(footage, tmp_path):
+    rep = build(footage, "landscape").render(tmp_path / "deliver.mp4", codec="h264", workers=2)
+    v = next(x for x in probe(rep["output"])["streams"] if x["codec_type"] == "video")
+    assert v["codec_name"] == "h264" and rep["color"].startswith("Rec.709 SDR (1-1-1), limited range, 8-bit H.264")

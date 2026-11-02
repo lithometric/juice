@@ -307,14 +307,20 @@ def _spec(ws: Workspace, path: str, fmt: str | None):
 @tool("render", """
 Render a cut from its reel.json. preview=true (default) renders at 480p, half frame rate, in seconds, to
 edit/final_preview.mp4 and attaches a filmstrip of the result; use it while iterating. preview=false renders full
-quality to the spec's output (edit/final.mp4) for every format in the spec; follow it with `check`.""",
+quality to the spec's output (edit/final.mp4) for every format in the spec; follow it with `check`.
+codec (full renders only): hevc (default 10-bit master), h264 (8-bit, when the person asks for H.264), prores
+(ProRes 422 HQ .mov, when they want a file to edit).""",
       {"spec": _s("the spec", default="reel.json"), "preview": _b("fast preview (default true)"),
-       "format": _s("one format name when the spec has several (optional)")})
-def t_render(ws: Workspace, spec: str = "reel.json", preview: bool = True, format: str | None = None) -> Result:
+       "format": _s("one format name when the spec has several (optional)"),
+       "codec": _s("hevc | h264 | prores (optional)", enum=["hevc", "h264", "prores"])})
+def t_render(ws: Workspace, spec: str = "reel.json", preview: bool = True, format: str | None = None,
+             codec: str | None = None) -> Result:
     from juice.shortform import render
     reports, images = [], []
     for fmt in ([format] if format else spec_mod.formats(ws.media(spec))):
         sp = _spec(ws, spec, fmt)
+        if codec:
+            sp.style["codec"] = codec
         if preview:
             sp = spec_mod.preview(sp)
         rep = render.render(sp)
@@ -341,6 +347,17 @@ def t_check(ws: Workspace, spec: str = "reel.json", format: str | None = None) -
         reports.append(rep)
         images += [Path(p) for p in rep.get("look_at", []) if Path(p).exists()]
     return Result(_j(reports if len(reports) > 1 else reports[0]), images)
+
+
+@tool("overlays", """
+A cut's graphics alone (captions, chips, titles, HUDs, tags, shot text) on a transparent background, as a
+ProRes 4444 .mov with alpha on the edit's timeline (edit/overlays.mov), for a person who wants to lay them over
+the footage in Resolve, Premiere or Final Cut. Only when they ask for overlays or an editable graphics layer.""",
+      {"spec": _s("the spec", default="reel.json"), "format": _s("one format (optional)")})
+def t_overlays(ws: Workspace, spec: str = "reel.json", format: str | None = None) -> Result:
+    from juice.shortform import overlays
+    reps = [overlays.render(_spec(ws, spec, fmt)) for fmt in ([format] if format else spec_mod.formats(ws.media(spec)))]
+    return Result(_j(reps if len(reps) > 1 else reps[0]))
 
 
 @tool("retention", """
@@ -397,15 +414,17 @@ def t_tag(ws: Workspace, media: str, tracks: str, out: str = "tagged.mp4", size:
 
 @tool("motion", """
 Render a juice.motion script (a .py that builds a Video). mode: "stills" (one frame per scene on a contact
-sheet, seconds: look every round), "preview" (480p, every other frame) or "render" (full quality, split across
-cores). Output goes to out/<script>_<orientation>[_preview].mp4 next to the script. Set orientation to render
+sheet, seconds: look every round), "preview" (480p, every other frame), "render" (full quality, split across
+cores) or "overlays" (only the overlays on transparent: a ProRes 4444 .mov with alpha, when the person wants
+graphics to lay over footage in an editor). codec for "render": hevc (default), h264, prores (422 HQ .mov). Output goes to out/<script>_<orientation>[_preview].mp4 next to the script. Set orientation to render
 the same script portrait or landscape.""",
-      {"script": _s("the script"), "mode": _s("stills | preview | render", enum=["stills", "preview", "render"]),
+      {"script": _s("the script"), "mode": _s("stills | preview | render | overlays", enum=["stills", "preview", "render", "overlays"]),
+       "codec": _s("hevc | h264 | prores (optional, for render)", enum=["hevc", "h264", "prores"]),
        "orientation": _s("portrait | landscape (optional)", enum=["portrait", "landscape"]),
        "times": {"type": "array", "items": _n("time (s)"), "description": "stills at these output times (optional)"}},
       ["script"])
 def t_motion(ws: Workspace, script: str, mode: str = "stills", orientation: str | None = None,
-             times: list[float] | None = None) -> Result:
+             times: list[float] | None = None, codec: str | None = None) -> Result:
     import runpy
     from juice.motion import Video
     path = ws.media(script)
@@ -423,13 +442,15 @@ def t_motion(ws: Workspace, script: str, mode: str = "stills", orientation: str 
     if not videos:
         return Result(f"{path.name} makes no Video")
     v = videos[-1]
-    out = path.parent / "out" / f"{path.stem}_{v.orientation}{'_preview' if mode == 'preview' else ''}.mp4"
+    tag = {"preview": "_preview", "overlays": "_overlays"}.get(mode, "")
+    out = path.parent / "out" / f"{path.stem}_{v.orientation}{tag}.mp4"
     if mode == "stills":
         ts = [float(t) for t in times] if times else \
             sorted({round(min(p.start + 0.6, (p.start + p.end) / 2), 2) for p in v.scenes})
         sheet = v.stills(ts, out.with_name(out.stem + "_stills.jpg"))
         return Result(f"stills of {path.name} ({v.orientation}) at {', '.join(f'{t:g}' for t in ts)} -> {ws.rel(sheet)}", [Path(sheet)])
-    rep = v.render(out, preview=(mode == "preview"))
+    rep = v.render(out, preview=(mode == "preview"), codec=codec if mode == "render" else None,
+                   overlays=(mode == "overlays"))
     return Result(_j(rep))
 
 

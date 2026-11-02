@@ -14,10 +14,11 @@
   juice music lyrics <track>                  where each lyric line lands
   juice music offset <lyric_s> <cut_s>        offset that lands a lyric on a cut
   juice ingest <files/folders...> [-o footage]  unpack, repair and transcribe a pile of downloads (parallel)
-  juice render <reel.json> [--format F] [--preview] [--encoder E]   build a cut (every format in the spec by default)
+  juice render <reel.json> [--format F] [--preview] [--encoder E] [--codec C]   build a cut (every format by default)
   juice motion <script.py> [--preview] [--stills [t,...]] [--orientation O]
                                               render a motion-graphics video (juice.motion script)
   juice beds [-o dir]                         the music bed styles, with a 30 s preview of each
+  juice overlays <reel.json> [--format F]     the cut's graphics on transparent (ProRes 4444 + alpha, for an editor)
   juice check <reel.json> [--format F]        verify the render (lengths, loudness, cuts, text zones,
                                                    reused/unused footage, triple hook)
 """
@@ -109,6 +110,8 @@ def _formats(a) -> list:
 def cmd_render(a):
     for fmt in _formats(a):
         sp = spec.load(a.spec, fmt)
+        if a.codec:
+            sp.style["codec"] = a.codec
         report = render.render(spec.preview(sp) if a.preview else sp, keep_clips=a.keep_clips)
         print(json.dumps(report, indent=2))
 
@@ -149,14 +152,20 @@ def cmd_motion(a):
     if not videos:
         sys.exit(f"{script.name} makes no Video")
     v = videos[-1]
-    tag = "_preview" if a.preview else ""
+    tag = ("_overlays" if a.overlays else "") + ("_preview" if a.preview else "")
     out = Path(a.out) if a.out else script.parent / "out" / f"{script.stem}_{v.orientation}{tag}.mp4"
     if a.stills is not None:
         times = [float(x) for x in a.stills.split(",")] if a.stills else \
             sorted({round(min(p.start + 0.6, (p.start + p.end) / 2), 2) for p in v.scenes})
         print(v.stills(times, out.with_name(out.stem + "_stills.jpg")))
         return
-    print(json.dumps(v.render(out, preview=a.preview), indent=2))
+    print(json.dumps(v.render(out, preview=a.preview, codec=a.codec, overlays=a.overlays), indent=2))
+
+
+def cmd_overlays(a):
+    from .shortform import overlays
+    for fmt in _formats(a):
+        print(json.dumps(overlays.render(spec.load(a.spec, fmt)), indent=2))
 
 
 def cmd_beds(a):
@@ -205,18 +214,26 @@ def main(argv=None):
     p.add_argument("--preview", action="store_true", help="480p, half frame rate, fast encode (to *_preview.mp4)")
     p.add_argument("--encoder", choices=["auto", "hardware", "software"],
                    help="media engine (default where there is one) or CPU, for decode and encode")
+    p.add_argument("--codec", choices=["hevc", "h264", "prores"],
+                   help="master codec: hevc (default, 10-bit), h264 (8-bit delivery), prores (422 HQ .mov to edit)")
     p.set_defaults(fn=cmd_render)
     p = sub.add_parser("motion", help="render a juice.motion script")
     p.add_argument("script"); p.add_argument("--preview", action="store_true")
     p.add_argument("--stills", nargs="?", const="", help="contact sheet at these times (default: every scene)")
     p.add_argument("--orientation", choices=["portrait", "landscape"]); p.add_argument("-o", "--out")
+    p.add_argument("--overlays", action="store_true",
+                   help="only the overlays, on transparent: a ProRes 4444 .mov with alpha for an editor")
     p.add_argument("--encoder", choices=["auto", "hardware", "software"],
                    help="media engine (default where there is one) or CPU, for decode and encode")
+    p.add_argument("--codec", choices=["hevc", "h264", "prores"],
+                   help="master codec: hevc (default, 10-bit), h264 (8-bit delivery), prores (422 HQ .mov to edit)")
     p.set_defaults(fn=cmd_motion)
     p = sub.add_parser("beds", help="music bed styles + previews"); p.add_argument("-o", "--out")
     p.set_defaults(fn=cmd_beds)
     from .media import ingest
     ingest.register(sub)
+    p = sub.add_parser("overlays", help="a cut's graphics on transparent: ProRes 4444 with alpha, for an editor")
+    p.add_argument("spec"); p.add_argument("--format"); p.set_defaults(fn=cmd_overlays)
     p = sub.add_parser("check"); p.add_argument("spec"); p.add_argument("--format")
     p.set_defaults(fn=cmd_check)
     p = sub.add_parser("retention", help="predicted retention score + the moments that lose viewers (no render needed)")

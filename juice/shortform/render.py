@@ -142,7 +142,7 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline,
     t0 = tl.starts[i]
     src = str(spec.sources[shot.source])
     src_len = shot.end - shot.start
-    out = clips / f"{i:02d}.mp4"
+    out = clips / f"{i:02d}{encode.container(es)}"
     fr = geom.Framing(shot, spec)
 
     eng = encode.engine_scale(src, W, H, es) if style.get("engine_scale") else None   # previews
@@ -221,15 +221,17 @@ def _fix_loudness(out: Path, target: dict, clips: Path, style: dict) -> None:
         return
     gain = target["I"] - m["integrated_lufs"]
     limit = 10 ** ((target["TP"] - 1.0) / 20)   # sample-peak limit; leaves room for inter-sample and AAC overshoot
-    tmp = clips / "loud_fix.mp4"
+    tmp = clips / f"loud_fix{out.suffix}"
     run(["ffmpeg", "-y", "-i", str(out), "-map", "0:v", "-map", "0:a", *encode.copy_args(style),
          "-af", f"volume={gain:.2f}dB,alimiter=limit={limit:.4f}:attack=2:release=50:level=false,aresample=48000",
-         *encode.audio_args("192k"), "-movflags", "+faststart", str(tmp)])
+         *encode.audio_args("192k", style), "-movflags", "+faststart", str(tmp)])
     tmp.replace(out)
 
 
 def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     style = spec.style
+    if spec.output.suffix != encode.container(style):   # a ProRes master is a .mov
+        spec.output = spec.output.with_suffix(encode.container(style))
     edit = spec.edit_dir
     edit.mkdir(parents=True, exist_ok=True)
     tag = (f"_{spec.format}" if spec.format else "") + ("_preview" if spec.output.stem.endswith("_preview") else "")
@@ -259,7 +261,7 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
 
     vlist = clips / "video.txt"
     vlist.write_text("".join(f"file '{p}'\n" for p, _, _ in parts))
-    silent = clips / "video.mp4"
+    silent = clips / f"video{encode.container(es)}"
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(vlist), *encode.copy_args(style), str(silent)])
 
     inputs = ["-i", str(silent)]
@@ -298,15 +300,19 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     else:
         mix = f"{''.join(labels)}amix=inputs={len(labels)}:normalize=0:duration=first,"
     ln = style["loudness"]
+    # The mix goes to a WAV of exactly the picture's sample count first, then gets muxed with the video. Mixed,
+    # encoded and cut with -t in one pass, the audio came out 66 ms short of a 76 s edit (AAC's padding hid it).
+    ns = round(total * 48000)
     chains.append(f"{mix}atrim=0:{total},loudnorm=I={ln['I']}:TP={ln['TP']}:LRA={ln['LRA']},"
-                  f"aresample=48000,aformat=channel_layouts=stereo[a]")
-    run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(chains),
-         "-map", "0:v", "-map", "[a]", *encode.copy_args(style), *encode.audio_args("192k"),
-         "-t", f"{total}", "-movflags", "+faststart", str(spec.output)])
+                  f"aresample=48000,aformat=channel_layouts=stereo,apad=whole_len={ns},atrim=end_sample={ns}[a]")
+    mixed = clips / "mix.wav"
+    run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(chains), "-map", "[a]", "-c:a", "pcm_s24le", str(mixed)])
+    run(["ffmpeg", "-y", "-i", str(silent), "-i", str(mixed), "-map", "0:v", "-map", "1:a", *encode.copy_args(style),
+         *encode.audio_args("192k", style), "-movflags", "+faststart", str(spec.output)])
 
     _fix_loudness(spec.output, ln, clips, style)
 
-    for f in (vlist, silent, clips / "audio.txt", clips / "audio.wav"):
+    for f in (vlist, silent, clips / "audio.txt", clips / "audio.wav", clips / "mix.wav"):
         f.unlink(missing_ok=True)
     if not keep_clips:
         shutil.rmtree(clips, ignore_errors=True)

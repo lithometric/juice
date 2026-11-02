@@ -36,6 +36,9 @@ def footage_problems(spec: Spec) -> list[str]:
 def check(spec: Spec) -> dict:
     """Verify the rendered output against the spec. Returns a report with any problems."""
     out = spec.output
+    mov = out.with_suffix(".mov")            # a ProRes master (render --codec prores) is written as a .mov
+    if mov.exists() and (not out.exists() or mov.stat().st_mtime > out.stat().st_mtime):
+        out = mov
     if not out.exists():
         raise SystemExit(f"not rendered yet: {out}")
     verify = spec.edit_dir / (f"verify_{spec.format}" if spec.format else "verify")

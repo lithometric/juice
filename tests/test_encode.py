@@ -10,7 +10,7 @@ import pytest
 from juice import encode
 from juice.motion import Video, scenes as s
 
-HW = encode.hardware_encoder(10) is not None
+HW = encode.hardware_encoder("hevc") is not None
 needs_hw = pytest.mark.skipif(not HW, reason="no media engine (VideoToolbox) on this machine")
 
 
