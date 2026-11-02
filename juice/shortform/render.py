@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -131,8 +132,10 @@ def _atempo(speed: float) -> str:
     return ",".join(parts)
 
 
-def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline) -> tuple[Path, Path | None, float]:
+def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline,
+                enc: dict | None = None) -> tuple[Path, Path | None, float]:
     style = spec.style
+    es = enc or style   # what the encoder sees: the spec's style, or its software fallback
     fps, W, H = style["fps"], style["width"], style["height"]
     n = spec.shot_frames(shot)
     dur = n / fps
@@ -142,7 +145,7 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline)
     out = clips / f"{i:02d}.mp4"
     fr = geom.Framing(shot, spec)
 
-    cmd = ["ffmpeg", "-y", "-ss", f"{shot.start}", "-t", f"{src_len}", "-i", src]
+    cmd = ["ffmpeg", "-y", *encode.decode_args(src, es), "-ss", f"{shot.start}", "-t", f"{src_len}", "-i", src]
     graph = [f"[0:v]{','.join(_video_filters(shot, spec, fr))}[v0]"]
     cur, k = "[v0]", 1
     if shot.text:
@@ -160,10 +163,10 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline)
         cmd += ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-r", str(fps), "-i", "pipe:0"]
         graph.append(f"[{k}:v]format=rgba[o{k}];{cur}[o{k}]overlay=0:0:eof_action=repeat[v{k}]")
         cur, k = f"[v{k}]", k + 1
-    post = ",".join(_finish(style, spec.theme, footage=False) + [f"format={encode.pix_fmt(style)}"])
+    post = ",".join(_finish(style, spec.theme, footage=False) + [f"format={encode.pix_fmt(es)}"])
     graph.append(f"{cur}{post}[v]")
     cmd += ["-filter_complex", ";".join(graph), "-map", "[v]",
-            "-an", "-frames:v", str(n), *encode.video_args(style),
+            "-an", "-frames:v", str(n), *encode.video_args(es),
             "-r", str(fps), "-video_track_timescale", "15360", str(out)]
     if layers:
         ctx = tlmod.Ctx(spec, spec.theme, tl)
@@ -204,14 +207,18 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline)
 
 
 def _fix_loudness(out: Path, target: dict, clips: Path, style: dict) -> None:
-    """Single-pass loudnorm undershoots on dynamic material (speech). Measure the result and, if it's
-    off by more than 0.5 LU, apply the remaining gain under a true-peak limiter (audio only; video copied)."""
+    """Single-pass loudnorm undershoots on dynamic material (speech), and the AAC encode can push peaks back
+    over the ceiling. Measure the result and, if it's off by more than 0.5 LU or peaks above target TP + 0.5 dB,
+    apply the remaining gain under a true-peak limiter (audio only; video copied)."""
     from ..media.inspect import loudness
     m = loudness(out)
-    if m["integrated_lufs"] is None or abs(m["integrated_lufs"] - target["I"]) <= 0.5:
+    if m["integrated_lufs"] is None:
+        return
+    peak = m["true_peak_db"]
+    if abs(m["integrated_lufs"] - target["I"]) <= 0.5 and (peak is None or peak <= target["TP"] + 0.5):
         return
     gain = target["I"] - m["integrated_lufs"]
-    limit = 10 ** ((target["TP"] - 0.3) / 20)
+    limit = 10 ** ((target["TP"] - 1.0) / 20)   # sample-peak limit; leaves room for inter-sample and AAC overshoot
     tmp = clips / "loud_fix.mp4"
     run(["ffmpeg", "-y", "-i", str(out), "-map", "0:v", "-map", "0:a", *encode.copy_args(style),
          "-af", f"volume={gain:.2f}dB,alimiter=limit={limit:.4f}:attack=2:release=50:level=false,aresample=48000",
@@ -229,8 +236,22 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     clips.mkdir()
 
     tl = tlmod.build(spec)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        parts = list(pool.map(lambda a: render_shot(a[0], a[1], spec, clips, tl), enumerate(spec.shots)))
+    encode.prepare(spec.sources.values(), style)   # each source's hardware decode, checked once, up front
+
+    def shots(enc: dict | None) -> list:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(lambda a: render_shot(a[0], a[1], spec, clips, tl, enc), enumerate(spec.shots)))
+
+    es = style
+    try:
+        parts = shots(None)
+    except RuntimeError as e:
+        if not (encode.hardware(style) or any(encode.decode_args(p, style) for p in spec.sources.values())):
+            raise
+        # The media engine refused something: redo every shot in software, so the parts still concatenate.
+        print(f"juice: hardware render failed, redoing it in software: {str(e).splitlines()[0]}", file=sys.stderr)
+        es = encode.software(style)
+        parts = shots(es)
     total = sum(d for _, _, d in parts)
     starts = tl.starts
 
@@ -293,6 +314,7 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
                "fx": [f["type"] for f in s.fx]}
               for s, t0, (_, _, d) in zip(spec.shots, starts, parts)]
     report = {"output": str(spec.output), "format": spec.format, "size": [style["width"], style["height"]],
+              "encoder": encode.describe(es),
               "duration_s": round(total, 3), "shots": ranges, "cuts_at": [r["at"] for r in ranges[1:]],
               "layers": [{"type": L.comp, "from": round(L.start, 2), "to": round(L.end, 2)} for L in tl.layers],
               "sfx": [{"at": round(a, 3), "sound": s} for a, s in events]}

@@ -1,8 +1,9 @@
 """Voice isolation: strip room noise, chatter and traffic from a take, keep the voice.
 
 DeepFilterNet3 (full-band 48 kHz speech enhancement, runs locally on the CPU in a fraction of real
-time). On the OpenBeam takes it drops the floor between words from -45 dB to -79 dB, leaves the speech
-level alone, and the transcript comes back word for word. (A music separator like Demucs doesn't
+time). On the OpenBeam takes it takes 10-15 dB of room tone out from between words (about -41 dB to
+-50/-57 dB, measured where the isolated track is quietest), the speech comes out ~3 dB quieter (the mix
+sets levels by loudness afterwards), and the transcript comes back word for word. (A music separator like Demucs doesn't
 work here: it hears cafe chatter as vocals.) It runs in its own uvx environment, like mlx-whisper,
 because it pins an older torch. Results are cached per source file.
 

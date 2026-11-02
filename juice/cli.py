@@ -14,7 +14,7 @@
   juice music lyrics <track>                  where each lyric line lands
   juice music offset <lyric_s> <cut_s>        offset that lands a lyric on a cut
   juice ingest <files/folders...> [-o footage]  unpack, repair and transcribe a pile of downloads (parallel)
-  juice render <reel.json> [--format F] [--preview]   build a cut (every format in the spec by default)
+  juice render <reel.json> [--format F] [--preview] [--encoder E]   build a cut (every format in the spec by default)
   juice motion <script.py> [--preview] [--stills [t,...]] [--orientation O]
                                               render a motion-graphics video (juice.motion script)
   juice beds [-o dir]                         the music bed styles, with a 30 s preview of each
@@ -203,11 +203,15 @@ def main(argv=None):
     p = sub.add_parser("render"); p.add_argument("spec"); p.add_argument("--keep-clips", action="store_true")
     p.add_argument("--format", help="render one format (default: all formats in the spec)")
     p.add_argument("--preview", action="store_true", help="480p, half frame rate, fast encode (to *_preview.mp4)")
+    p.add_argument("--encoder", choices=["auto", "hardware", "software"],
+                   help="media engine (default where there is one) or CPU, for decode and encode")
     p.set_defaults(fn=cmd_render)
     p = sub.add_parser("motion", help="render a juice.motion script")
     p.add_argument("script"); p.add_argument("--preview", action="store_true")
     p.add_argument("--stills", nargs="?", const="", help="contact sheet at these times (default: every scene)")
     p.add_argument("--orientation", choices=["portrait", "landscape"]); p.add_argument("-o", "--out")
+    p.add_argument("--encoder", choices=["auto", "hardware", "software"],
+                   help="media engine (default where there is one) or CPU, for decode and encode")
     p.set_defaults(fn=cmd_motion)
     p = sub.add_parser("beds", help="music bed styles + previews"); p.add_argument("-o", "--out")
     p.set_defaults(fn=cmd_beds)
@@ -219,6 +223,9 @@ def main(argv=None):
     p.add_argument("spec"); p.add_argument("--format"); p.set_defaults(fn=cmd_retention)
 
     a = ap.parse_args(argv)
+    if getattr(a, "encoder", None):   # decode and encode on the media engine, or on the CPU (see encode.py)
+        import os
+        os.environ["JUICE_ENCODER"] = os.environ["JUICE_DECODER"] = a.encoder
     try:
         a.fn(a)
     except spec.SpecError as e:

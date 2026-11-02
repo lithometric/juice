@@ -23,6 +23,7 @@ import multiprocessing as mp
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -328,8 +329,9 @@ class Video:
 
     # --- rendering --------------------------------------------------------------------------------
 
-    def render(self, out, preview=False, workers=None, crf=16) -> dict:
+    def render(self, out, preview=False, workers=None, crf=16, encoder=None) -> dict:
         """Render to out (mp4). preview = 480p on the short side at half the frame rate, fast encode.
+        encoder: auto | hardware | software (default: the media engine where there is one, see encode.py).
         Returns timings and paths."""
         t_start = time.time()
         out = Path(out).expanduser().resolve()
@@ -341,11 +343,16 @@ class Video:
         chunk = max(int(fps * 1.5), math.ceil(n / workers))
         ranges = [(a, min(n, a + chunk)) for a in range(0, n, chunk)]
         tmp = Path(tempfile.mkdtemp(prefix="juice-", dir=out.parent))
-        enc = encode.video_args({"bit_depth": 8, "crf": 28, "preset": "ultrafast"} if preview
-                                else {"bit_depth": 10, "crf": crf, "preset": "medium"})
+        est = ({"bit_depth": 8, "crf": 28, "preset": "ultrafast"} if preview
+               else {"bit_depth": 10, "crf": crf, "preset": "medium"})
+        if encoder:
+            est["encoder"] = encoder
+        enc = encode.video_args(est)
         jobs = [(k, a, b, scale, fps, str(tmp / f"part{k:03d}.mp4"), enc, preview) for k, (a, b) in enumerate(ranges)]
         for s in self.sources():
             s.close()
+        encode.prepare(s.path for s in self.sources())   # each file's hardware decode, checked once
+        _fork_safe()
         # Workers are forked and read the video from this global, so nothing (skia images, open
         # readers) has to be pickled.
         global _JOB
@@ -354,7 +361,25 @@ class Video:
         with ctx.Pool(len(jobs)) as pool:
             pending = pool.map_async(_render_chunk, jobs)
             wav = self.render_audio(tmp / "mix.wav", preview=preview)
-            parts = pending.get()
+            try:
+                parts = pending.get()
+            except (RuntimeError, OSError) as e:   # an encode that failed, or a pipe it closed early
+                if not encode.hardware(est) and not any(encode.decode_args(s.path) for s in self.sources()):
+                    raise
+                parts = None
+                print(f"juice: hardware render failed, redoing it in software: {e}", file=sys.stderr)
+        if parts is None:   # every chunk again in software, so the parts still concatenate
+            est = encode.software(est)
+            enc = encode.video_args(est)
+            jobs = [(k, a, b, scale, fps, path, enc, preview) for k, a, b, scale, fps, path, _, preview in jobs]
+            saved = {k: os.environ.get(k) for k in ("JUICE_ENCODER", "JUICE_DECODER")}
+            os.environ.update(JUICE_ENCODER="software", JUICE_DECODER="software")   # the forked readers too
+            try:
+                with ctx.Pool(len(jobs)) as pool:
+                    parts = pool.map(_render_chunk, jobs)
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
         t_video = time.time() - t_start
         (tmp / "parts.txt").write_text("".join(f"file '{p}'\n" for p in parts))
         _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(tmp / "parts.txt"), "-i", str(wav),
@@ -364,6 +389,7 @@ class Video:
         shutil.rmtree(tmp, ignore_errors=True)
         report = {"output": str(out), "preview": preview, "size": [round(self.W * scale), round(self.H * scale)],
                   "fps": fps, "frames": n, "workers": len(jobs), "duration_s": round(self.duration, 3),
+                  "encoder": encode.describe(est),
                   "render_s": round(time.time() - t_start, 1), "video_s": round(t_video, 1),
                   "audio": getattr(self, "audio_report", None)}
         return report
@@ -401,6 +427,22 @@ class Video:
 
 
 _JOB: Video | None = None
+
+
+def _fork_safe():
+    """Make the fonts' first use here, before forking. macOS aborts a forked child that initializes an
+    Objective-C class when the parent process has ever run a second thread (an MCP server, an agent that
+    rendered a cut first, a test run), and skia loads and draws fonts through CoreText. Once a typeface is
+    made and drawn in the parent, the classes are initialized and the children only reuse them."""
+    if sys.platform != "darwin":
+        return
+    from .core import font
+    surf = skia.Surface(64, 32)
+    c = surf.getCanvas()
+    for f in (font("Inter", 400, 16), skia.Font(skia.Typeface("Helvetica Neue"), 16)):   # a file face, a system face
+        c.drawString("Aa", 2, 20, f, skia.Paint(AntiAlias=True))
+        f.measureText("Aa")
+    surf.flushAndSubmit()
 
 
 def _render_chunk(job):

@@ -16,7 +16,7 @@ import skia
 
 from .. import brand as brand_mod
 from .. import fonts as fonts_mod
-from .. import hdr
+from .. import encode, hdr
 
 SAMP = skia.SamplingOptions(skia.FilterMode.kLinear, skia.MipmapMode.kLinear)
 
@@ -168,7 +168,7 @@ class Source:
         vf += [f"scale={self.size[0]}:{self.size[1]}:force_original_aspect_ratio=increase:flags=bicubic",
                f"crop={self.size[0]}:{self.size[1]}", *hdr.filters(self.path), "format=rgba"]
         dur = [] if self.end is None else ["-t", f"{max(0.05, self.end - s0) + 0.2:.3f}"]
-        cmd = ["ffmpeg", "-v", "error", "-ss", f"{s0:.3f}", *dur, "-i", self.path, "-an",
+        cmd = ["ffmpeg", "-v", "error", *encode.decode_args(self.path), "-ss", f"{s0:.3f}", *dur, "-i", self.path, "-an",
                "-vf", ",".join(vf), "-f", "rawvideo", "-"]
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10 ** 7)
         self.t0, self.idx, self.arr, self.img = lt, -1, None, None

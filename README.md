@@ -51,6 +51,14 @@ echo 'OPENROUTER_API_KEY=...' >> .env    # for juice-agent
 
 Run from your project folder with `uv run --project /path/to/juice juice <command>` (or `juice-agent`, `juice-mcp`).
 
+**Hardware.** On Apple silicon, renders decode and encode on the media engine (VideoToolbox): masters are
+HEVC Main 10 at constant quality 65, which matched x265 CRF 16 on VMAF, at a fraction of the CPU.
+HEVC and ProRes sources (iPhone, most cameras) decode in hardware too, once a one-time check per file shows
+the media engine gives the same frames as software. H.264 decodes faster on the CPU's cores, so it goes to the
+media engine only with `--encoder hardware`, and Sony's 4:2:2 10-bit H.264 never does. Anything the
+media engine refuses mid-render is redone in software. `--encoder software` (or `JUICE_ENCODER=software`,
+`JUICE_DECODER=software`) forces the CPU path; see `juice/encode.py`.
+
 ## The agent
 
 ```bash
