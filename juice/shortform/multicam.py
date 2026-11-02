@@ -12,7 +12,17 @@ Who is talking comes from the strongest evidence there is:
      between frames of a cropped mouth (no landmarks) barely told them apart. This also ties mics and labels
      to cameras: a voice belongs to the close-up whose mouth opens when it speaks; a voice none follows is
      off camera.
-A camera with one big face is a close-up; anything else is a wide. Then the edit, in the order it applies:
+A camera with one big face is a close-up; anything else is a wide.
+
+What it costs is decoding video, not the face models (lip landmarks are ~1 ms a frame). Cameras are read in
+parallel on the media engine at 10 fps, skipping the frames nothing refers to: 40 s of 4K60 iPhone HEVC
+decodes in 4.0 s instead of 6.9 s, three cameras at once in 6.9 s. With a mic per person or speaker labels the
+sound already says who talks when, so only a few stretches of each voice are looked at (to tie voices to
+cameras and find the faces), however long the shoot; only mouths-alone reads the whole range (27 s of three
+4K60 cameras: 15.3 s before these changes, 6.8 s now). Every frame's faces are cached per file
+(~/.cache/juice/faces), so running it again over the same footage decodes nothing (0.2 s).
+
+Then the edit, in the order it applies:
   - cut to a speaker's close-up `lead` (0.08 s) before the first word of their phrase
   - two people at once, or a voice that's off camera: the wide
   - an interjection shorter than `min_shot` stays on whoever has the floor
@@ -21,8 +31,11 @@ Each shot carries a "note" saying why, which `juice export` turns into a marker 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
@@ -38,7 +51,10 @@ FPS = 10
 WIDTH = 480
 LBF_URL = "https://raw.githubusercontent.com/kurnianggoro/GSOC2017/master/data/lbfmodel.yaml"
 LBF = Path.home() / ".cache" / "juice" / "models" / "lbfmodel.yaml"
+CACHE = Path.home() / ".cache" / "juice" / "faces"
+VERSION = 1           # bump when what a cached frame holds changes
 _marks = None
+_marks_lock = threading.Lock()   # one landmark model for every camera's thread
 
 
 @dataclass
@@ -47,7 +63,7 @@ class Subject:
     angle: str
     x: float = 0.0                       # where it sits across the frame (0-1)
     sizes: list = field(default_factory=list)
-    mouth: np.ndarray | None = None      # per grid sample: lip opening over mouth width, nan where unseen
+    mouth: np.ndarray | None = None      # per sample: lip opening over mouth width, nan where unseen
     z: np.ndarray | None = None          # how open and how fast-moving, against its own normal (robust z)
 
     @property
@@ -56,13 +72,16 @@ class Subject:
 
 
 def _frames(path: Path, l0: float, dur: float):
-    """(local time, BGR frame) at FPS, decoded and scaled on the media engine where it can be."""
+    """(local time, BGR frame) at FPS, decoded and scaled on the media engine where it can be. Frames no other
+    frame refers to are never decoded (-skip_frame noref): at 10 fps out of 60 the samples land on the frames
+    that are left, at most a frame or two from their exact time, and decoding takes half as long."""
     sw, sh = source_size(str(path))
     h = round(WIDTH * sh / sw)
     h += h % 2
     eng = encode.engine_scale(path, WIDTH, h)
     inputs, vf = (eng[0], [f"fps={FPS}", *eng[1]]) if eng else ([], [f"fps={FPS}", f"scale={WIDTH}:{h}"])
-    cmd = ["ffmpeg", "-v", "error", *inputs, "-ss", f"{max(l0, 0):.3f}", "-t", f"{dur:.3f}", "-i", str(path),
+    cmd = ["ffmpeg", "-v", "error", *inputs, "-skip_frame", "noref", "-ss", f"{max(l0, 0):.3f}", "-t", f"{dur:.3f}",
+           "-an", "-i", str(path),
            "-vf", ",".join(vf + ["format=bgr24"]), "-f", "rawvideo", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     n, k = WIDTH * h * 3, 0
@@ -76,7 +95,8 @@ def _frames(path: Path, l0: float, dur: float):
 
 
 def _facemark():
-    """OpenCV's 68-point LBF landmark model (56 MB, fetched once into ~/.cache/juice/models)."""
+    """OpenCV's 68-point LBF landmark model (56 MB, fetched once into ~/.cache/juice/models). Call under
+    _marks_lock: one model serves every camera's thread."""
     global _marks
     if _marks is None:
         import cv2
@@ -95,7 +115,9 @@ def _openings(img: np.ndarray, boxes: list) -> list[float]:
     import cv2
     if not boxes:
         return []
-    ok, pts = _facemark().fit(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), np.array(boxes, np.int32))
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    with _marks_lock:
+        ok, pts = _facemark().fit(gray, np.array(boxes, np.int32))
     out = []
     for f in (pts if ok else [None] * len(boxes)):
         if f is None:
@@ -109,52 +131,97 @@ def _openings(img: np.ndarray, boxes: list) -> list[float]:
 
 def _z(x: np.ndarray) -> np.ndarray:
     seen = x[~np.isnan(x)]
+    if len(seen) < 3:
+        return np.full(len(x), np.nan)
     med = np.median(seen)
     return (x - med) / (1.4826 * np.median(np.abs(seen - med)) + 1e-6)
 
 
-def look(group: Group, name: str, grid: np.ndarray) -> list[Subject]:
-    """Every face one angle sees over the grid (group times), with how open its mouth is."""
+def _scan(path: Path, k0: int, k1: int) -> dict[int, list]:
+    """Faces in samples k0..k1-1 of a file's own 10 fps clock: {k: [[center x, center y, height, lip opening],
+    ...]}, positions as fractions of the frame. Samples past the end of the file come back empty."""
+    out = {k: [] for k in range(k0, k1)}
+    for lt, img in _frames(path, k0 / FPS, (k1 - k0) / FPS):
+        k = round(lt * FPS)
+        if k not in out:
+            continue
+        H, W = img.shape[:2]
+        found = [r for r in hooks.landmarks(img) if r[14] >= 0.6]
+        out[k] = [[round(float((r[0] + r[2] / 2) / W), 4), round(float((r[1] + r[3] / 2) / H), 4),
+                   round(float(r[3] / H), 4), None if np.isnan(op) else round(op, 4)]
+                  for r, op in zip(found, _openings(img, [r[:4] for r in found]))]
+    return out
+
+
+def _cache_file(path: Path) -> Path:
+    st = path.stat()
+    key = f"{path.resolve()}|{st.st_size}|{int(st.st_mtime)}|{FPS}|{WIDTH}|{VERSION}"
+    return CACHE / f"{path.stem}-{hashlib.sha1(key.encode()).hexdigest()[:12]}.json"
+
+
+def faces(path: Path, ks) -> dict[int, list]:
+    """Faces at these samples of a file's own 10 fps clock, decoding only the ones no earlier run looked at.
+    Runs of missing samples less than 2 s apart are read in one go: a fresh seek costs more than the gap."""
+    cf = _cache_file(Path(path))
+    try:
+        data = {int(k): v for k, v in json.loads(cf.read_text()).items()}
+    except (OSError, ValueError):
+        data = {}
+    missing = sorted(k for k in set(ks) if k not in data)
+    runs = []
+    for k in missing:
+        if runs and k - runs[-1][1] <= 2 * FPS:
+            runs[-1][1] = k + 1
+        else:
+            runs.append([k, k + 1])
+    for k0, k1 in runs:
+        data.update(_scan(Path(path), k0, k1))
+    if runs:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        tmp = cf.with_suffix(".part")
+        tmp.write_text(json.dumps(data, separators=(",", ":")))
+        tmp.replace(cf)
+    return {k: data[k] for k in ks if k in data}
+
+
+def look(group: Group, name: str, vt: np.ndarray) -> list[Subject]:
+    """Every face one angle sees at the sample times vt (group clock, sorted), with how open its mouth is."""
     subjects: list[Subject] = []
-    last: dict[int, tuple] = {}            # subject index -> (sample index, center)
-    rows: dict[int, dict] = {}
+    last: dict[int, tuple] = {}            # subject index -> center last seen
+    seen: dict[int, dict] = {}             # subject index -> {sample index: lip opening}
     for tk in group.angles[name].takes:
         if not tk.video:
             continue
-        a, b = max(tk.covers[0], grid[0]), min(tk.covers[1], grid[-1] + 1 / FPS)
-        if b - a < 1 / FPS:
-            continue
-        for lt, img in _frames(tk.path, tk.local(a), (b - a) / tk.rate):
-            k = round((tk.offset + tk.rate * lt - grid[0]) * FPS)
-            if not 0 <= k < len(grid):
-                continue
-            H, W = img.shape[:2]
-            found = [r for r in hooks.landmarks(img) if r[14] >= 0.6]
-            taken = {}
-            for row in found:
-                c = ((row[0] + row[2] / 2) / W, (row[1] + row[3] / 2) / H)
-                best = min((j for j in last if j not in taken.values()),
-                           key=lambda j: np.hypot(c[0] - last[j][1][0], c[1] - last[j][1][1]), default=None)
-                if best is None or np.hypot(c[0] - last[best][1][0], c[1] - last[best][1][1]) > 0.12:
+        idx = [i for i, t in enumerate(vt) if tk.covers[0] <= t < tk.covers[1]]
+        ks = {i: round(tk.local(vt[i]) * FPS) for i in idx}
+        found = faces(tk.path, set(ks.values()))
+        for i in idx:
+            taken = set()
+            for cx, cy, h, op in found.get(ks[i], []):
+                best = min((j for j in last if j not in taken),
+                           key=lambda j: np.hypot(cx - last[j][0], cy - last[j][1]), default=None)
+                if best is None or np.hypot(cx - last[best][0], cy - last[best][1]) > 0.12:
                     subjects.append(Subject(angle=name))
                     best = len(subjects) - 1
-                taken[id(row)] = best
-                subjects[best].sizes.append(row[3] / H)
-                last[best] = (k, c)
-            for row, v in zip(found, _openings(img, [r[:4] for r in found])):
-                rows.setdefault(taken[id(row)], {})[k] = v
+                taken.add(best)
+                subjects[best].sizes.append(h)
+                last[best] = (cx, cy)
+                seen.setdefault(best, {})[i] = np.nan if op is None else op
     out = []
+    step = np.r_[np.inf, np.diff(vt)] if len(vt) else np.array([])
     for j, s in enumerate(subjects):
-        if len(s.sizes) < 0.2 * len(grid):        # a passer-by, or a face for a moment
+        if len(s.sizes) < 0.2 * len(vt):           # a passer-by, or a face for a moment
             continue
-        m = np.full(len(grid), np.nan)
-        for k, v in rows.get(j, {}).items():
-            m[k] = v
+        m = np.full(len(vt), np.nan)
+        for i, v in seen.get(j, {}).items():
+            m[i] = v
         if np.sum(~np.isnan(m)) < 10:
             continue
-        # Open lips, and lips moving from one frame to the next: talking does both, a smile only the first.
-        s.mouth, s.z = m, (_z(m) + _z(np.abs(np.diff(m, prepend=np.nan)))) / 2
-        s.x = float(last[j][1][0])
+        # Open lips, and lips moving from one sample to the next: talking does both, a smile only the first.
+        # (Only between neighbouring samples: across the gap between two looked-at stretches it means nothing.)
+        moving = np.where(step < 1.5 / FPS, np.abs(np.diff(m, prepend=np.nan)), np.nan)
+        s.mouth, s.z = m, (_z(m) + _z(moving)) / 2
+        s.x = float(last[j][0])
         out.append(s)
     return out
 
@@ -162,7 +229,9 @@ def look(group: Group, name: str, grid: np.ndarray) -> list[Subject]:
 def _channels(path: Path, grid: np.ndarray) -> np.ndarray | None:
     """Each channel's level on the grid (dB under its own loudest speech), when the sound file has a channel
     per mic. Calibrating each mic to its own speech, not its floor, keeps a hot lav from winning everything:
-    a voice reaches ~0 on its own lav and sits 10-20 dB down on the others."""
+    a voice reaches ~0 on its own lav and sits 10-20 dB down on the others. A camera's stereo pair is not a mic
+    per person: its two sides stay within a few dB of each other (an iPhone's: never 10 dB apart, median 2 dB),
+    where each of two lavs leads by more than 6 dB whenever its own person talks."""
     info = json.loads(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
                                       "stream=channels", "-of", "json", str(path)],
                                      capture_output=True, text=True, check=True).stdout or "{}")
@@ -174,12 +243,14 @@ def _channels(path: Path, grid: np.ndarray) -> np.ndarray | None:
                           "-i", str(path), "-map", "0:a:0", "-ar", str(sr), "-f", "f32le", "-"],
                          capture_output=True, check=True).stdout
     x = np.frombuffer(raw, np.float32).reshape(-1, ch)
-    if np.corrcoef(x[:, 0], x[:, 1])[0, 1] > 0.98:     # a stereo copy of one mic, not two mics
-        return None
     hop = sr // FPS
     n = min(len(grid), len(x) // hop)
     lv = 10 * np.log10(np.mean(x[: n * hop].reshape(n, hop, ch) ** 2, axis=1) + 1e-10)
     lv -= np.percentile(lv, 95, axis=0)
+    speech = lv.max(1) > -30
+    if not any(np.mean(d > 6) >= 0.1 and np.mean(d < -6) >= 0.1
+               for i in range(ch) for j in range(i + 1, ch) for d in [(lv[:, i] - lv[:, j])[speech]]):
+        return None                                   # one place heard twice (stereo), not a mic per person
     out = np.zeros((len(grid), ch))
     out[:n] = lv
     return out
@@ -197,6 +268,28 @@ def _phrases(words: list[dict], who: list) -> list[dict]:
     return out
 
 
+def _mean(x: np.ndarray, sl) -> float:
+    v = x[sl]
+    v = v[~np.isnan(v)]
+    return float(v.mean()) if len(v) else float("nan")
+
+
+def _windows(words: list[dict], who: list, g0: float, per_voice: int = 6, length: float = 3.0) -> np.ndarray:
+    """Sample times for a few stretches of each voice talking, its longest phrases first, at least 20 s apart:
+    enough to see whose mouth opens with which voice, without reading the whole recording."""
+    keep = []
+    for v in sorted({x for x in who if x is not None}):
+        picked = []
+        for p in sorted((p for p in _phrases(words, who) if p["who"] == v), key=lambda p: p["start"] - p["end"]):
+            if len(picked) == per_voice:
+                break
+            if all(abs(p["start"] - q) >= 20 for q in picked):
+                picked.append(p["start"])
+                keep.append((p["start"], min(p["end"], p["start"] + length)))
+    ks = sorted({k for a, b in keep for k in range(round((a - g0) * FPS), round((b - g0) * FPS) + 1)})
+    return g0 + np.array(ks, float) / FPS
+
+
 def plan(group: Group, words: list[dict], g0: float | None = None, g1: float | None = None,
          min_shot: float = 1.5, max_shot: float = 8.0, lead: float = 0.08) -> dict:
     """The shots (group times, an angle each, and why) for g0..g1 of a synced group."""
@@ -211,19 +304,11 @@ def plan(group: Group, words: list[dict], g0: float | None = None, g1: float | N
     words = [w for w in words if g0 <= w["start"] and w["end"] <= g1]
     grid = g0 + np.arange(int((g1 - g0) * FPS) + 1) / FPS
 
-    subjects = {}
-    for k in cams:     # the people a camera is pointed at; faces far smaller are the room behind them
-        found = look(group, k, grid)
-        big = max((s.size for s in found), default=0)
-        subjects[k] = [s for s in found if s.size >= 0.5 * big]
-    close = {k: s[0] for k, s in subjects.items() if len(s) == 1 and s[0].size >= 0.1}
-    wides = [k for k in cams if k not in close]
-    wide = max(wides, key=lambda k: len(subjects[k])) if wides else None
-
-    def span(a, b):
+    def span(a, b):      # grid samples a word covers
         return slice(max(0, int((a - g0) * FPS)), max(1, int(np.ceil((b - g0) * FPS))))
 
-    # Who said each word: the mic loudest against its own speech level, else the transcript's label.
+    # Who said each word, from the sound when it can tell: the mic loudest against its own speech level, else
+    # the transcript's label. Neither: the mouths decide, further down.
     lv = _channels(group.sound.path, grid)
     if lv is not None:
         who, both = [], []
@@ -238,16 +323,39 @@ def plan(group: Group, words: list[dict], g0: float | None = None, g1: float | N
         for i in range(len(words) - 1):          # one label's word inside another's: two at once
             if words[i + 1]["start"] < words[i]["end"] - 0.15 and who[i] != who[i + 1]:
                 both[i] = both[i + 1] = True
-    else:    # each word to the close-up whose mouth is clearly the most active around it (0.7 s)
+    else:
+        who, both, evidence = [None] * len(words), [False] * len(words), "mouths"
+
+    # The video to look at: a few stretches of each voice when the sound already says who talks when, the whole
+    # range when only mouths can. Every camera at once.
+    vt = _windows(words, who, g0) if evidence != "mouths" else grid
+    if not len(vt):
+        vt = grid[:: max(1, len(grid) // 200)]
+
+    def vs(a, b):        # samples looked at between a and b
+        i = int(np.searchsorted(vt, a - 1e-6))
+        return slice(i, max(i, int(np.searchsorted(vt, b - 1e-6))))
+
+    with ThreadPoolExecutor(max_workers=min(4, len(cams))) as pool:
+        found = dict(zip(cams, pool.map(lambda k: look(group, k, vt), cams)))
+    subjects = {}
+    for k in cams:     # the people a camera is pointed at; faces far smaller are the room behind them
+        big = max((f.size for f in found[k]), default=0)
+        subjects[k] = [f for f in found[k] if f.size >= 0.5 * big]
+    close = {k: f[0] for k, f in subjects.items() if len(f) == 1 and f[0].size >= 0.1}
+    wides = [k for k in cams if k not in close]
+    wide = max(wides, key=lambda k: len(subjects[k])) if wides else None
+
+    if evidence == "mouths":   # each word to the close-up whose mouth is clearly the most active around it (0.7 s)
         from scipy.ndimage import uniform_filter1d
         smooth = {}
-        for k, s in close.items():
-            z = np.nan_to_num(s.z, nan=0.0)
-            seen = uniform_filter1d((~np.isnan(s.z)).astype(float), 7)
+        for k, f in close.items():
+            z = np.nan_to_num(f.z, nan=0.0)
+            seen = uniform_filter1d((~np.isnan(f.z)).astype(float), 7)
             smooth[k] = np.where(seen > 0.3, uniform_filter1d(z, 7) / np.maximum(seen, 1e-3), np.nan)
-        who, both, evidence = [], [False] * len(words), "mouths"
+        who = []
         for w in words:
-            z = {k: float(np.nanmean(v[span(w["start"], w["end"])])) for k, v in smooth.items()}
+            z = {k: _mean(v, vs(w["start"], w["end"])) for k, v in smooth.items()}
             z = {k: x for k, x in z.items() if not np.isnan(x)}
             top = sorted(z, key=z.get, reverse=True)
             sure = top and z[top[0]] >= 0.3 and (len(top) == 1 or z[top[0]] - z[top[1]] >= 0.3)
@@ -260,24 +368,27 @@ def plan(group: Group, words: list[dict], g0: float | None = None, g1: float | N
         if both[i] and not (both[i - 1] or both[i + 1]):
             both[i] = False
 
-    # Tie each voice to the close-up whose mouth moves when it speaks (a mouth is its own close-up).
+    # Tie each voice to the face whose mouth opens when it speaks: its close-up, and where it sits in the wide.
     voices = sorted({v for v in who if v is not None})
-    cast = {}
-    for v in voices if evidence != "mouths" else []:
-        mine = np.zeros(len(grid), bool)
-        theirs = np.zeros(len(grid), bool)
-        for w, u in zip(words, who):
-            (mine if u == v else theirs)[span(w["start"], w["end"])] = True
-        scores = {k: float(np.nanmean(s.z[mine]) - (np.nanmean(s.z[theirs]) if theirs.any() else 0))
-                  for k, s in close.items() if mine.any() and not np.isnan(s.z[mine]).all()}
-        k = max(scores, key=scores.get, default=None)
-        if k is not None and scores[k] > 0.3:
-            cast[v] = (k, scores[k])
-    taken = {}
-    for v, (k, sc) in sorted(cast.items(), key=lambda x: -x[1][1]):   # one voice per close-up
-        if k not in taken.values():
-            taken[v] = k
-    cast = taken if evidence != "mouths" else {k: k for k in voices}
+
+    def tie(faces_by: dict) -> dict:
+        scores = {}
+        for v in voices:
+            mine, theirs = np.zeros(len(vt), bool), np.zeros(len(vt), bool)
+            for w, u in zip(words, who):
+                (mine if u == v else theirs)[vs(w["start"], w["end"])] = True
+            for key, f in faces_by.items():
+                a, b = _mean(f.z, mine), (_mean(f.z, theirs) if theirs.any() else 0.0)
+                if not np.isnan(a):
+                    scores[(v, key)] = a - (0.0 if np.isnan(b) else b)
+        out = {}
+        for (v, key), sc in sorted(scores.items(), key=lambda x: -x[1]):    # one voice per face
+            if sc > 0.3 and v not in out and key not in out.values():
+                out[v] = key
+        return out
+
+    cast = tie(close) if evidence != "mouths" else {k: k for k in voices}
+    in_wide = tie({i: f for i, f in enumerate(subjects[wide])}) if wide else {}
 
     phrases = _phrases(words, [f"{v}|both" if b else v for v, b in zip(who, both)])
     picks = []
@@ -291,7 +402,7 @@ def plan(group: Group, words: list[dict], g0: float | None = None, g1: float | N
         elif v is not None:
             picks.append((wide, f"{v} is off camera: the wide"))
         else:
-            z = {k: float(np.nanmean(s.z[span(p['start'], p['end'])])) for k, s in close.items()}
+            z = {k: _mean(f.z, vs(p["start"], p["end"])) for k, f in close.items()}
             z = {k: x for k, x in z.items() if not np.isnan(x)}
             top = sorted(z, key=z.get, reverse=True)
             if top and z[top[0]] >= 0.5 and (len(top) == 1 or z[top[0]] - z[top[1]] >= 0.3):
@@ -352,16 +463,26 @@ def plan(group: Group, words: list[dict], g0: float | None = None, g1: float | N
             final[-1]["end"] = s["end"]
         else:
             final.append(s)
-    # Frame each shot on the face that's talking in it (the wide's too), for a portrait cut from landscape.
+    # Frame each shot on the face that's talking in it (in the wide, the face of the voice heard most), so a
+    # portrait cut from landscape cameras keeps the talker in frame.
     for s in final:
-        faces = [f for f in subjects[s["angle"]] if f.z is not None]
-        if faces:
-            sl = span(s["start"], s["end"])
-            talk = max(faces, key=lambda f: np.nan_to_num(np.nanmean(f.z[sl]) if (~np.isnan(f.z[sl])).any() else -9))
-            s["frame_x"] = round(talk.x, 3)
+        faces_here = subjects[s["angle"]]
+        if not faces_here:
+            continue
+        if len(faces_here) == 1:
+            s["frame_x"] = round(faces_here[0].x, 3)
+            continue
+        heard = [v for w, v in zip(words, who) if v and s["start"] <= w["start"] < s["end"]]
+        top = max(set(heard), key=heard.count) if heard else None
+        if s["angle"] == wide and top in in_wide:
+            talk = faces_here[in_wide[top]]
+        else:
+            talk = max(faces_here, key=lambda f: np.nan_to_num(_mean(f.z, vs(s["start"], s["end"])), nan=-9.0))
+        s["frame_x"] = round(talk.x, 3)
     return {"range": [round(g0, 3), round(g1, 3)], "evidence": evidence, "wide": wide,
-            "close": {k: {"x": round(s.x, 2), "face": round(s.size, 2)} for k, s in close.items()},
+            "close": {k: {"x": round(f.x, 2), "face": round(f.size, 2)} for k, f in close.items()},
             "cast": cast, "faces": {k: len(v) for k, v in subjects.items()},
+            "video_looked_at_s": round(len(vt) / FPS, 1),
             "shots": [{"angle": s["angle"], "start": round(s["start"], 3), "end": round(s["end"], 3),
                        **({"frame_x": s["frame_x"]} if "frame_x" in s else {}), "note": s["note"]} for s in final]}
 

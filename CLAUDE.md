@@ -64,6 +64,9 @@ look (`trailer_hype.py` is the same story in the loud look).
    evidence there is: a mic per person, then the transcript's speaker labels, then which mouth opens with
    the words. Talker's close-up just before their first word, the wide for crosstalk and off-camera voices,
    interjections under 1.5 s held, a cutaway at a pause in turns over 8 s. Read each shot's `note`.
+   With a mic per person or speaker labels it reads a few seconds of video per voice, so it takes seconds
+   at any length; mouths alone read everything (about 15 min per hour of three 4K cameras). Faces are
+   cached per file, so running it again is instant.
 3. Then it's a cut like any other: `{"source": "pod", "angle": "camB", "start": 12.0, "end": 15.5}`. Times
    are the group's sound file's own clock, so its transcript drives captions and events; changing `angle`
    never moves a cut. `check` treats the same moment from another angle as reused footage and flags an

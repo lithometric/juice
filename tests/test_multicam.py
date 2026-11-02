@@ -210,3 +210,41 @@ def test_a_long_turn_cuts_away_at_a_pause(talk):
     away = [s for s in res["shots"] if s["note"].startswith("long turn")]
     assert away and all(s["end"] - s["start"] >= 1.5 for s in res["shots"])
     assert all(s["end"] - s["start"] <= 6 + 4 for s in res["shots"])
+
+
+def test_a_mic_per_person_means_looking_at_a_few_seconds_of_video(talk):
+    d, words = talk
+    res = multicam.plan(spec.load_group(d, "sync.json"), words, max_shot=30)
+    assert res["video_looked_at_s"] < 10 < res["range"][1] - res["range"][0]
+
+
+def test_a_stereo_pair_is_not_a_mic_per_person(tmp_path):
+    x = speechlike(20, 5)
+    rng = np.random.default_rng(1)
+    pair = np.stack([x + 0.01 * rng.standard_normal(len(x)), 0.8 * x + 0.01 * rng.standard_normal(len(x))], 1)
+    st = wav(pair.reshape(-1), tmp_path / "stereo.wav", channels=2)
+    assert multicam._channels(st, np.arange(0, 20, 0.1)) is None
+
+
+def test_frames_skip_only_what_sampling_never_needs(tmp_path):
+    clip = tmp_path / "b.mp4"      # libx264 makes B-frames nothing refers to: skipped, yet every sample comes out
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=60:d=3", "-c:v", "libx264",
+                    "-bf", "3", "-pix_fmt", "yuv420p", str(clip)], check=True)
+    times = [round(t, 2) for t, _ in multicam._frames(clip, 1.0, 1.5)]
+    assert times == [round(1.0 + k / multicam.FPS, 2) for k in range(15)]
+
+
+def test_faces_are_read_once_per_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(multicam, "CACHE", tmp_path / "faces")
+    scans = []
+
+    def fake_scan(path, k0, k1):
+        scans.append((k0, k1))
+        return {k: [[0.5, 0.4, 0.3, 0.1]] for k in range(k0, k1)}
+    monkeypatch.setattr(multicam, "_scan", fake_scan)
+    clip = wav(np.zeros(SR, np.float32), tmp_path / "any.wav")
+    assert len(multicam.faces(clip, range(10, 40))) == 30 and scans == [(10, 40)]
+    multicam.faces(clip, range(10, 40))
+    assert scans == [(10, 40)]                       # the second run decodes nothing
+    multicam.faces(clip, range(30, 60))
+    assert scans == [(10, 40), (40, 60)]             # only what no run has looked at
