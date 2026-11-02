@@ -119,6 +119,46 @@ def t_footage(ws: Workspace, dir: str = "footage") -> Result:
     return Result("\n".join(rows) or f"no media files under {dir}")
 
 
+@tool("sync", """
+Line up recordings of one event (several cameras, a separate audio recorder) on one clock by their sound, with
+timecode or the phones' clocks as a hint, and each file's clock drift taken out. Use it whenever the person shot
+the same moment from more than one camera, or recorded sound separately. Writes sync.json (each file's offset,
+drift, and the camera angle it belongs to) and sync.png (every file on the shared clock, to check by eye).
+Next: `multicam` to pick angles, or a reel.json with "multicam": {"pod": "<sync.json>"}.""",
+      {"inputs": {"type": "array", "items": _s("file or folder"), "description": "the recordings"},
+       "clock": _s("the file whose time is the clock (default: the recorder, else the longest file)"),
+       "out": _s("output", default="footage/sync.json")}, ["inputs"])
+def t_sync(ws: Workspace, inputs: list[str], clock: str | None = None, out: str = "footage/sync.json") -> Result:
+    from juice.media import sync
+    data = sync.align(sync.files([ws.media(p) for p in inputs]), ws.media(clock) if clock else None)
+    o = sync.write(data, ws.inside(out))
+    png = sync.sheet(data, o.with_suffix(".png"))
+    return Result(_j({**data, "file": ws.rel(o)}), [png])
+
+
+@tool("multicam", """
+Cut a synced conversation (podcast, interview, panel) by picking the angle for every moment: the close-up of
+whoever is talking (from a mic per person, the transcript's speaker labels, or which mouth moves with the
+words), the wide when two talk at once or the voice is off camera, short interjections held on whoever has the
+floor, and a cutaway at a pause in any turn longer than max_shot. Writes the shots into reel.json (times on the
+group's clock, an angle and a note each). Read the notes, then edit reel.json like any cut: trim, reorder,
+change an angle with "angle". Render with `render`; `export` hands it to Resolve.""",
+      {"sync": _s("sync.json from `sync`", default="footage/sync.json"),
+       "out": _s("reel.json to write (its shots are replaced if it exists)", default="reel.json"),
+       "start": _n("from (clock s, optional)"), "end": _n("to (clock s, optional)"),
+       "min_shot": _n("shortest shot (s, default 1.5)"), "max_shot": _n("longest shot before a cutaway (s, default 8)")})
+def t_multicam(ws: Workspace, sync: str = "footage/sync.json", out: str = "reel.json", start: float | None = None,
+               end: float | None = None, min_shot: float = 1.5, max_shot: float = 8.0) -> Result:
+    from juice.shortform import multicam
+    from juice.shortform import spec as sp
+    path = ws.media(sync)
+    group = sp.load_group(path.parent, path.name)
+    tp = multicam.transcript(group.sound.path)
+    res = multicam.plan(group, json.loads(tp.read_text()).get("words", []), start, end, min_shot, max_shot)
+    o = multicam.write_reel(res, path, tp, ws.inside(out))
+    return Result(_j({**res, "reel": ws.rel(o)}))
+
+
 @tool("probe", "Stream facts about one media file (duration, width, height, fps, audio), via ffprobe.",
       {"media": _s("path to a video or audio file")}, ["media"])
 def t_probe(ws: Workspace, media: str) -> Result:
@@ -357,6 +397,19 @@ the footage in Resolve, Premiere or Final Cut. Only when they ask for overlays o
 def t_overlays(ws: Workspace, spec: str = "reel.json", format: str | None = None) -> Result:
     from juice.shortform import overlays
     reps = [overlays.render(_spec(ws, spec, fmt)) for fmt in ([format] if format else spec_mod.formats(ws.media(spec)))]
+    return Result(_j(reps if len(reps) > 1 else reps[0]))
+
+
+@tool("export", """
+Hand the edit to DaVinci Resolve: edit/resolve/ with cut.otio (the cut on V1, edit/overlays.mov on V2 if
+`overlays` made it, sound, music and sound effects on their own tracks, a marker per cut with its note), one
+angles_<group>.otio per multicam group (every camera on its own track, synced; in Resolve's Media Pool,
+right-click it > Convert Compound Clips (Timelines) to Multicam Clips), captions.srt and a README with the steps.
+Only when the person wants to finish or change the edit in Resolve (or another editor that reads OTIO).""",
+      {"spec": _s("the spec", default="reel.json"), "format": _s("one format (optional)")})
+def t_export(ws: Workspace, spec: str = "reel.json", format: str | None = None) -> Result:
+    from juice.shortform import handoff
+    reps = [handoff.export(_spec(ws, spec, fmt)) for fmt in ([format] if format else spec_mod.formats(ws.media(spec)))]
     return Result(_j(reps if len(reps) > 1 else reps[0]))
 
 

@@ -10,6 +10,12 @@ There are two kinds of video, and each can be short or long form:
 
 Paths inside a spec are relative to the spec file.
 
+Multicam: `"multicam": {"pod": "footage/sync.json"}` (from `juice sync`) makes "pod" a source whose
+shots pick an angle: `{"source": "pod", "angle": "wide", "start": 12.0, "end": 15.5}`. Times are on the
+group's clock, which is its sound file's own time (the recorder, or the camera chosen for sound), so its
+transcript, captions and events work unchanged and switching the angle never moves the cut. Angle names are
+file stems, or `{"pod": {"sync": "...", "audio": "rec.wav", "angles": {"wide": "A001.mov"}}}` to name them.
+
 One spec can render both orientations from the same cuts:
 `"formats": {"portrait": {"style": {...}}, "landscape": {"style": {...}}}`. A shot can override
 fields for one of them with `"per_format": {"landscape": {...}}`.
@@ -56,10 +62,51 @@ class Shot:
     replay: bool = False         # a flash-forward/hook: shown, but source events don't fire here
     blur: float = 0.0            # background blur (sigma at 1080p) under title cards / end cards
     fx: list = field(default_factory=list)  # overlays / sound effects, see components.py and sfx.py
+    angle: str | None = None     # multicam source: which camera of the group this shot shows
+    note: str | None = None      # why this shot (shown as a marker when the cut goes to an editor)
 
     @property
     def duration(self) -> float:
         return (self.end - self.start) / self.speed + self.freeze_s
+
+
+@dataclass
+class Take:
+    """One file of a multicam group: group time t is at (t - offset) / rate in the file."""
+    path: Path
+    offset: float
+    rate: float
+    duration: float
+    video: bool
+
+    def local(self, t: float) -> float:
+        return (t - self.offset) / self.rate
+
+    @property
+    def covers(self) -> tuple[float, float]:
+        return self.offset, self.offset + self.rate * self.duration
+
+
+@dataclass
+class Angle:
+    """One camera (or recorder) of a multicam group: its files in time order; they never overlap."""
+    takes: list[Take]
+
+    @property
+    def video(self) -> bool:
+        return any(t.video for t in self.takes)
+
+    def take(self, a: float, b: float | None = None) -> Take | None:
+        """The file rolling over a..b, if one is."""
+        b = a if b is None else b
+        return next((t for t in self.takes if t.covers[0] - 0.02 <= a and b <= t.covers[1] + 0.02), None)
+
+
+@dataclass
+class Group:
+    angles: dict[str, Angle]     # name -> camera, on the group clock
+    sound: Take                  # the file whose sound (and own time) is the group's
+    sync: Path
 
 
 @dataclass
@@ -87,6 +134,37 @@ class Spec:
     events: list = field(default_factory=list)      # moments in the source that drive fx/sfx/meters
     meters: dict = field(default_factory=dict)      # named values for HUD meters: {"gpt": 100}
     transcripts: dict = field(default_factory=dict) # source key -> word-level transcript path (captions)
+    groups: dict = field(default_factory=dict)      # multicam source key -> Group
+
+    def take(self, shot: Shot) -> Take | None:
+        """A multicam shot's file: its angle's take rolling over the shot."""
+        g = self.groups.get(shot.source)
+        return g.angles[shot.angle].take(shot.start, shot.end) if g else None
+
+    def video(self, shot: Shot) -> Path:
+        """The file a shot's picture comes from (its angle's, for a multicam source)."""
+        tk = self.take(shot)
+        return tk.path if tk else self.sources[shot.source]
+
+    def local(self, shot: Shot, t: float) -> float:
+        """Source time t of a shot as a time in its picture file."""
+        tk = self.take(shot)
+        return tk.local(t) if tk else t
+
+    def seek(self, shot: Shot) -> float:
+        """Where to start reading a shot's picture. A multicam angle starts on its frame nearest the shot's
+        start (a camera's frames fall anywhere against the sound's clock), so it is never a frame behind."""
+        t = self.local(shot, shot.start)
+        if shot.source not in self.groups:
+            return t
+        from .geom import source_fps
+        fps = source_fps(str(self.video(shot)))
+        return max(0.0, round(t * fps) / fps - 0.25 / fps)
+
+    def files(self) -> list[Path]:
+        """Every media file the edit reads."""
+        out = [p for k, p in self.sources.items() if k not in self.groups]
+        return out + [t.path for g in self.groups.values() for a in g.angles.values() for t in a.takes]
 
     @property
     def edit_dir(self) -> Path:
@@ -142,6 +220,38 @@ def formats(path: str | Path) -> list[str | None]:
     return [ALIASES.get(k, k) for k in raw.get("formats", {})] or [None]
 
 
+def load_group(base: Path, value) -> Group:
+    """A multicam group from sync.json, re-timed onto its sound file's clock."""
+    value = {"sync": value} if isinstance(value, str) else dict(value)
+    sync_path = (base / value["sync"]).resolve()
+    if not sync_path.exists():
+        raise SpecError(f"multicam sync file not found: {sync_path} (make it with `juice sync`)")
+    data = json.loads(sync_path.read_text())
+    clips = {c["name"]: c for c in data["clips"] if "offset" in c}
+    rename = {}                                   # sync's angle name -> the spec's
+    for k, n in value.get("angles", {}).items():
+        if n not in clips:
+            raise SpecError(f"multicam angle {k!r}: {n!r} isn't placed in {sync_path.name}")
+        rename[clips[n]["angle"]] = k
+    sound = value.get("audio") or data["clock"]
+    if sound not in clips:                        # an angle name: its longest file with sound
+        names = {rename.get(c["angle"], c["angle"]): c["angle"] for c in clips.values()}
+        cands = [c for c in clips.values() if c["angle"] == names.get(sound) and c["audio"]]
+        sound = max(cands, key=lambda c: c["duration"])["name"] if cands else sound
+    if sound not in clips or not clips[sound]["audio"]:
+        raise SpecError(f"multicam sound {sound!r} isn't a placed file with sound in {sync_path.name}")
+    a = clips[sound]
+
+    def take(c):   # sync.json's clock -> the sound file's clock: t_sound = (t_clock - a.offset) / a.rate
+        return Take(path=Path(c["path"]), offset=(c["offset"] - a["offset"]) / a["rate"], rate=c["rate"] / a["rate"],
+                    duration=c["duration"], video=c["video"])
+
+    angles: dict[str, Angle] = {}
+    for c in sorted(clips.values(), key=lambda c: c["offset"]):
+        angles.setdefault(rename.get(c["angle"], c["angle"]), Angle([])).takes.append(take(c))
+    return Group(angles=angles, sound=take(a), sync=sync_path)
+
+
 def load(path: str | Path, fmt: str | None = None) -> Spec:
     from . import components, sfx  # local: keeps spec importable without numpy for simple use
     from . import theme as theme_mod
@@ -160,6 +270,11 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
         raise SpecError(f"unknown format {fmt!r} (spec has: {', '.join(fmts) or 'none'})")
 
     sources = {k: (base / v).resolve() for k, v in raw.get("sources", {}).items()}
+    groups = {k: load_group(base, v) for k, v in raw.get("multicam", {}).items()}
+    for k, g in groups.items():
+        if k in sources:
+            raise SpecError(f"{k!r} is both a source and a multicam group")
+        sources[k] = g.sound.path                 # a group's sound, transcript and clock are its sound file's
     if not sources:
         raise SpecError("spec has no sources")
     for k, p in sources.items():
@@ -174,6 +289,19 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
             raise SpecError(f"shot {i}: unknown source {s['source']!r}")
         if s["end"] <= s["start"]:
             raise SpecError(f"shot {i}: end ({s['end']}) must be after start ({s['start']})")
+        angle = s.get("angle")
+        if s["source"] in groups:
+            g = groups[s["source"]]
+            cams = [k for k, a in g.angles.items() if a.video]
+            angle = angle or (cams[0] if cams else None)
+            if angle not in cams:
+                raise SpecError(f"shot {i}: {s['source']!r} has no camera angle {angle!r} (have: {', '.join(cams)})")
+            if not g.angles[angle].take(s["start"], s["end"]):
+                rolls = ", ".join(f"{t.covers[0]:.2f}-{t.covers[1]:.2f}" for t in g.angles[angle].takes)
+                raise SpecError(f"shot {i}: angle {angle!r} isn't rolling over all of {s['start']}-{s['end']}s "
+                                f"(it rolls {rolls}s of {s['source']!r})")
+        elif angle:
+            raise SpecError(f"shot {i}: angle {angle!r} given, but {s['source']!r} isn't a multicam group")
         text = None
         if s.get("text"):
             t = s["text"]
@@ -195,7 +323,7 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
                           speed=speed, frame_x=s.get("frame_x", 0.5), shake=s.get("shake"),
                           fx=list(s.get("fx", [])), zoom=s.get("zoom", 1.0), follow=s.get("follow"),
                           follow_y=float(s.get("follow_y", 2.0)), replay=bool(s.get("replay", False)),
-                          blur=float(s.get("blur", 0))))
+                          blur=float(s.get("blur", 0)), angle=angle, note=s.get("note")))
     if not shots:
         raise SpecError("spec has no shots")
 
@@ -251,6 +379,7 @@ def load(path: str | Path, fmt: str | None = None) -> Spec:
         music=music,
         original_audio=bool(raw.get("original_audio", False)),
         style=style,
+        groups=groups,
     )
 
 

@@ -23,9 +23,11 @@ juice-agent "cut a 30s portrait reel, bold look"   ──►  a model does all o
 
 ```
 juice/              the engine (Python package, `juice` command)
-  shortform/        cuts: spec.py (reel.json), render.py, check.py, timeline, components, themes, hooks, retention, tracking
+  shortform/        cuts: spec.py (reel.json), render.py, check.py, timeline, components, themes, hooks, retention, tracking,
+                    multicam.py (angle picking), handoff.py (OTIO for Resolve), overlays.py
   motion/           motion videos: video.py (the Video API), scenes.py (loud look), clean.py (clean look), mix.py
-  media/            ingest, recover, transcribe, whisper, isolate (voice), inspect (filmstrips), music, beds
+  media/            ingest, recover, transcribe, whisper, isolate (voice), inspect (filmstrips), music, beds,
+                    sync (cameras and recorders on one clock)
   brand.py          juice.json brand kits        cli.py  the command line
 harness/            the agent: tools.py (every command as a tool), agent.py (the loop), openrouter.py, prompt.py,
                     cli.py (`juice-agent`), mcp_server.py (`juice-mcp`)
@@ -138,6 +140,9 @@ Claude Code also works with the repo checked out and no server at all: `CLAUDE.m
 | `formats` | Render one edit in both orientations: `{"portrait": {}, "landscape": {"style": {...}}}`; shots can override fields per orientation with `per_format` |
 | `music.offset` | Where in the song the reel starts |
 | `original_audio` | Keep the sources' audio (music is ducked under it) |
+| `multicam` | `{"pod": "footage/sync.json"}` (from `juice sync`): a source whose shots pick a camera; its times are its sound file's own clock |
+| `shots[].angle` | Which camera of a `multicam` source the shot shows (`juice multicam` picks them; change it freely, the cut doesn't move) |
+| `shots[].note` | Why the shot is there; `juice export` makes it a marker in Resolve |
 
 ## Themes and components
 
@@ -177,6 +182,10 @@ juice retention reel.json                  # predicted retention score, 3s/end r
 juice ingest ~/Downloads/RESEARCH "~/Downloads/Unconfirmed 1234.crdownload" -o footage
                                            # unpack (even cut-off Drive zips), repair moov-less recordings,
                                            # transcribe, contact sheet + manifest.json, in parallel
+juice sync footage/ -o footage/sync.json   # every camera and recorder of one event on one clock, by its sound
+juice multicam footage/sync.json -o reel.json  # the talker's close-up, the wide for crosstalk: shots with notes
+juice export reel.json                     # edit/resolve/: cut.otio, angles_<group>.otio (a multicam clip in one
+                                                # right-click), captions.srt, for DaVinci Resolve
 juice render reel.json --preview           # 480p, half frame rate: a check in seconds
 juice motion trailer.py --stills           # a frame from every scene on one sheet
 juice motion trailer.py --preview          # the whole motion video at 480p in seconds

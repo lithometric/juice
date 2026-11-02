@@ -29,6 +29,14 @@ def source_size(path: str) -> tuple[int, int]:
     return (h, w) if rot in (90, 270) else (w, h)
 
 
+@lru_cache(maxsize=64)
+def source_fps(path: str) -> float:
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
+                          "-of", "json", path], capture_output=True, text=True, check=True).stdout
+    num, den = json.loads(out)["streams"][0]["r_frame_rate"].split("/")
+    return int(num) / int(den)
+
+
 def live(shot: Shot) -> float:
     """Output seconds of moving picture (before any freeze)."""
     return (shot.end - shot.start) / shot.speed
@@ -59,7 +67,7 @@ def follow_points(shot: Shot, spec: Spec) -> tuple[list[float], list[float], lis
     ts = list(np.linspace(0, L, n))
     xs, ys = [], []
     for t in ts:
-        src_t = shot.start + t * shot.speed
+        src_t = spec.local(shot, shot.start + t * shot.speed)   # tracks are timed in the picture file
         near = [r[1:5] for r, keep in zip(path, np.abs(pt - src_t) <= 0.08) if keep]
         x, y, w, h = np.array(near or [path[int(np.argmin(np.abs(pt - src_t)))][1:5]]).mean(0)
         xs.append(x + w / 2)
@@ -73,7 +81,7 @@ class Framing:
     def __init__(self, shot: Shot, spec: Spec):
         st = spec.style
         self.shot, self.W, self.H, self.fps = shot, st["width"], st["height"], st["fps"]
-        sw, sh = source_size(str(spec.sources[shot.source]))
+        sw, sh = source_size(str(spec.video(shot)))
         self.sw, self.sh = sw, sh
         self.k = max(self.W / sw, self.H / sh)
         self.cw, self.ch = sw * self.k, sh * self.k

@@ -15,7 +15,9 @@ from .spec import Spec
 
 def footage_problems(spec: Spec) -> list[str]:
     """Editorial checks on the cut itself: no moment of a clip used twice, and every clip used.
-    A shot marked "replay": true (a deliberate flash-forward/replay) is allowed to repeat footage."""
+    A shot marked "replay": true (a deliberate flash-forward/replay) is allowed to repeat footage.
+    A multicam group is one clip: the same moment from another angle is a repeat too, and every camera
+    angle should be used somewhere."""
     out = []
     used = {}
     for i, s in enumerate(spec.shots):
@@ -30,6 +32,10 @@ def footage_problems(spec: Spec) -> list[str]:
     unused = [k for k in spec.sources if k not in {s.source for s in spec.shots}]
     if unused:
         out.append(f"clips provided but not used: {', '.join(unused)}")
+    for k, g in spec.groups.items():
+        idle = [a for a, x in g.angles.items() if x.video and a not in {s.angle for s in spec.shots if s.source == k}]
+        if idle:
+            out.append(f"multicam {k!r}: angles never used: {', '.join(idle)}")
     return out
 
 

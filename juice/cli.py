@@ -14,11 +14,14 @@
   juice music lyrics <track>                  where each lyric line lands
   juice music offset <lyric_s> <cut_s>        offset that lands a lyric on a cut
   juice ingest <files/folders...> [-o footage]  unpack, repair and transcribe a pile of downloads (parallel)
+  juice sync <files/folders...> [-o sync.json]  line up every camera and recorder of one event by its sound
+  juice multicam <sync.json> [-o reel.json]   pick the angle for every moment of a synced conversation
   juice render <reel.json> [--format F] [--preview] [--encoder E] [--codec C]   build a cut (every format by default)
   juice motion <script.py> [--preview] [--stills [t,...]] [--orientation O]
                                               render a motion-graphics video (juice.motion script)
   juice beds [-o dir]                         the music bed styles, with a 30 s preview of each
   juice overlays <reel.json> [--format F]     the cut's graphics on transparent (ProRes 4444 + alpha, for an editor)
+  juice export <reel.json> [--format F]       hand the edit to DaVinci Resolve: OTIO timelines (multicam angles too)
   juice check <reel.json> [--format F]        verify the render (lengths, loudness, cuts, text zones,
                                                    reused/unused footage, triple hook)
 """
@@ -168,6 +171,12 @@ def cmd_overlays(a):
         print(json.dumps(overlays.render(spec.load(a.spec, fmt)), indent=2))
 
 
+def cmd_export(a):
+    from .shortform import handoff
+    for fmt in _formats(a):
+        print(json.dumps(handoff.export(spec.load(a.spec, fmt)), indent=2))
+
+
 def cmd_beds(a):
     from .media import beds
     paths = beds.library(Path(a.out).expanduser()) if a.out else beds.library()
@@ -230,10 +239,15 @@ def main(argv=None):
     p.set_defaults(fn=cmd_motion)
     p = sub.add_parser("beds", help="music bed styles + previews"); p.add_argument("-o", "--out")
     p.set_defaults(fn=cmd_beds)
-    from .media import ingest
+    from .media import ingest, sync
+    from .shortform import multicam
     ingest.register(sub)
+    sync.register(sub)
+    multicam.register(sub)
     p = sub.add_parser("overlays", help="a cut's graphics on transparent: ProRes 4444 with alpha, for an editor")
     p.add_argument("spec"); p.add_argument("--format"); p.set_defaults(fn=cmd_overlays)
+    p = sub.add_parser("export", help="hand the edit to DaVinci Resolve: OTIO timelines, multicam angles, captions")
+    p.add_argument("spec"); p.add_argument("--format"); p.set_defaults(fn=cmd_export)
     p = sub.add_parser("check"); p.add_argument("spec"); p.add_argument("--format")
     p.set_defaults(fn=cmd_check)
     p = sub.add_parser("retention", help="predicted retention score + the moments that lose viewers (no render needed)")

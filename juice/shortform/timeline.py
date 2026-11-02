@@ -184,11 +184,11 @@ class Ctx:
         i = self.shot_at(self.t_out)
         shot = self.spec.shots[i]
         from .geom import source_size
-        if list(source_size(str(self.spec.sources[shot.source]))) != list(tracks["size"]):
+        if list(source_size(str(self.spec.video(shot)))) != list(tracks["size"]):
             return None
         fr = self._framing.get(i) or self._framing.setdefault(i, Framing(shot, self.spec))
         tr = self.t_out - self.tl.starts[i]
-        src_t = shot.start + min(tr, fr.L) * shot.speed
+        src_t = self.spec.local(shot, shot.start + min(tr, fr.L) * shot.speed)
         path = tracks["targets"][name]["path"]
         times = tracks["targets"][name].setdefault("_t", np.array([r[0] for r in path]))
         if not times[0] <= src_t <= times[-1]:

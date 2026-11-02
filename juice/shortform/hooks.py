@@ -59,10 +59,17 @@ _lock = threading.Lock()   # one YuNet net, not thread-safe: input size and forw
 def faces(img: np.ndarray) -> list[tuple[float, float, float, float]]:
     """Face boxes (x, y, w, h) with YuNet; [] if the model can't be fetched (offline)."""
     with _lock:
-        return _faces(img)
+        return [tuple(float(v) for v in f[:4]) for f in _detect(img)]
 
 
-def _faces(img: np.ndarray) -> list[tuple[float, float, float, float]]:
+def landmarks(img: np.ndarray) -> np.ndarray:
+    """YuNet's full rows, one per face: x, y, w, h, then right eye, left eye, nose tip, right and left mouth
+    corners (x, y each), then the score. Empty (0 x 15) if the model can't be fetched."""
+    with _lock:
+        return _detect(img)
+
+
+def _detect(img: np.ndarray) -> np.ndarray:
     global _detector
     import cv2
     if _detector is None:
@@ -81,10 +88,10 @@ def _faces(img: np.ndarray) -> list[tuple[float, float, float, float]]:
                     continue
             _detector = cv2.FaceDetectorYN.create(str(YUNET), "", (320, 320), 0.7)
     if _detector is False:
-        return []
+        return np.zeros((0, 15), np.float32)
     _detector.setInputSize((img.shape[1], img.shape[0]))
     _, found = _detector.detect(img)
-    return [] if found is None else [tuple(float(v) for v in f[:4]) for f in found]
+    return np.zeros((0, 15), np.float32) if found is None else found
 
 
 def _audio(media: Path, sr: int = 16000) -> np.ndarray:

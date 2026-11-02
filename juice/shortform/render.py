@@ -91,7 +91,7 @@ def _video_filters(shot: Shot, spec: Spec, fr: geom.Framing, scale: list[str] | 
         vf.append(f"crop={w}:{h}:x='{_pw_linear('t', fr.ts, fr.x0s)}':y='{fr.y0:.2f}'")
     else:
         vf.append(f"crop={w}:{h}:x='{_crop_x(shot, live)}':y='(ih-oh)/2'")
-    vf += hdr.filters(spec.sources[shot.source])   # HLG/PQ phone footage -> SDR bt709, on the cropped frame
+    vf += hdr.filters(spec.video(shot))   # HLG/PQ phone footage -> SDR bt709, on the cropped frame
     if style.get("grade"):
         vf.append(style["grade"])
     if zoom != 1.0:
@@ -140,14 +140,14 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline,
     n = spec.shot_frames(shot)
     dur = n / fps
     t0 = tl.starts[i]
-    src = str(spec.sources[shot.source])
+    src = str(spec.video(shot))            # the picture (a multicam shot's angle)
     src_len = shot.end - shot.start
     out = clips / f"{i:02d}{encode.container(es)}"
     fr = geom.Framing(shot, spec)
 
     eng = encode.engine_scale(src, W, H, es) if style.get("engine_scale") else None   # previews
     cmd = ["ffmpeg", "-y", *(eng[0] if eng else encode.decode_args(src, es)),
-           "-ss", f"{shot.start}", "-t", f"{src_len}", "-i", src]
+           "-ss", f"{spec.seek(shot):.6f}", "-t", f"{src_len}", "-i", src]
     graph = [f"[0:v]{','.join(_video_filters(shot, spec, fr, eng[1] if eng else None))}[v0]"]
     cur, k = "[v0]", 1
     if shot.text:
@@ -203,7 +203,8 @@ def render_shot(i: int, shot: Shot, spec: Spec, clips: Path, tl: tlmod.Timeline,
         af = (f"aresample=48000,atrim=0:{src_len},asetpts=PTS-STARTPTS,"
               f"{tempo}afade=t=in:st=0:d={e},afade=t=out:st={max(live - e, 0)}:d={e},"
               f"apad=whole_len={n},atrim=end_sample={n},asetpts=PTS-STARTPTS")
-        run(["ffmpeg", "-y", "-ss", f"{shot.start}", "-i", src, "-vn",
+        # The sound is the source's own (a multicam group's sound file, on whose clock the shot is timed).
+        run(["ffmpeg", "-y", "-ss", f"{shot.start}", "-i", str(spec.sources[shot.source]), "-vn",
              "-af", af, "-ac", "2", "-c:a", "pcm_s16le", str(wav)])
     return out, wav, dur
 
@@ -240,7 +241,7 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     clips.mkdir()
 
     tl = tlmod.build(spec)
-    encode.prepare(spec.sources.values(), style)   # each source's hardware decode, checked once, up front
+    encode.prepare(spec.files(), style)   # each source's hardware decode, checked once, up front
 
     def shots(enc: dict | None) -> list:
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -250,7 +251,7 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     try:
         parts = shots(None)
     except RuntimeError as e:
-        if not (encode.hardware(style) or any(encode.decode_args(p, style) for p in spec.sources.values())):
+        if not (encode.hardware(style) or any(encode.decode_args(p, style) for p in spec.files())):
             raise
         # The media engine refused something: redo every shot in software, so the parts still concatenate.
         print(f"juice: hardware render failed, redoing it in software: {str(e).splitlines()[0]}", file=sys.stderr)
@@ -317,8 +318,8 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
     if not keep_clips:
         shutil.rmtree(clips, ignore_errors=True)
 
-    ranges = [{"source": s.source, "start": s.start, "end": s.end, "speed": s.speed, "at": round(t0, 3),
-               "duration": round(d, 3), "text": s.text.lines if s.text else None,
+    ranges = [{"source": s.source, **({"angle": s.angle} if s.angle else {}), "start": s.start, "end": s.end,
+               "speed": s.speed, "at": round(t0, 3), "duration": round(d, 3), "text": s.text.lines if s.text else None,
                "fx": [f["type"] for f in s.fx]}
               for s, t0, (_, _, d) in zip(spec.shots, starts, parts)]
     report = {"output": str(spec.output), "format": spec.format, "size": [style["width"], style["height"]],

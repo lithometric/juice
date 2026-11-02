@@ -55,6 +55,24 @@ look (`trailer_hype.py` is the same story in the loud look).
   full render (~1 s of render per second of video). Look at the stills every round.
 - After the render: check loudness (-14 LUFS), and transcribe the output once to confirm every line reads.
 
+## Multicam (two or more cameras, or sound recorded separately)
+
+1. `juice sync footage/ -o footage/sync.json` puts every file on one clock by its sound (timecode or the
+   phones' clocks as a hint; each camera's drift against the recorder taken out), and groups each camera's
+   files into an angle. Look at `footage/sync.png`. A file that shares no sound is left unplaced: say so.
+2. `juice multicam footage/sync.json -o reel.json` picks the angle for every moment, from the strongest
+   evidence there is: a mic per person, then the transcript's speaker labels, then which mouth opens with
+   the words. Talker's close-up just before their first word, the wide for crosstalk and off-camera voices,
+   interjections under 1.5 s held, a cutaway at a pause in turns over 8 s. Read each shot's `note`.
+3. Then it's a cut like any other: `{"source": "pod", "angle": "camB", "start": 12.0, "end": 15.5}`. Times
+   are the group's sound file's own clock, so its transcript drives captions and events; changing `angle`
+   never moves a cut. `check` treats the same moment from another angle as reused footage and flags an
+   angle that's never used.
+4. For Resolve: `juice export reel.json` writes `edit/resolve/` (cut.otio, angles_<group>.otio with every
+   camera on its own track, captions.srt, a README). In Resolve's Media Pool, right-click the angles
+   timeline > Convert Compound Clips (Timelines) to Multicam Clips. That's a synced multicam clip, even in
+   the free version.
+
 ## What the human/script gives you vs. what you handle
 
 - **They give:** the footage, the look ("bold game", "calm doc", "loud rage bait", brand colors/fonts,
@@ -237,7 +255,8 @@ different, unhinged question was asked, so the innocent answer sounds wrong.
 ## Files
 
 - `reel.json` (the edit) or a motion script, `juice.json` (the brand kit), `style.json` (optional, the
-  creator's style overrides), `footage/` (from `juice ingest`), `music/`, `transcripts/`
+  creator's style overrides), `footage/` (from `juice ingest`; `footage/sync.json` from `juice sync`),
+  `music/`, `transcripts/`
 - Output: `edit/final.mp4`, overwritten in place. `edit/clips/` and `edit/verify/` hold only the
   current render's files and are rebuilt every run. Don't create new copies of the video per edit.
 - Secrets: `ELEVENLABS_API_KEY` in the environment or a git-ignored `.env`. Never commit it.
