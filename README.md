@@ -59,7 +59,9 @@ media engine only with `--encoder hardware`, and Sony's 4:2:2 10-bit H.264 never
 media engine refuses mid-render is redone in software. `--encoder software` (or `JUICE_ENCODER=software`,
 `JUICE_DECODER=software`) forces the CPU path; see `juice/encode.py`. Previews and stills also scale on the media
 engine (masters keep the sharper CPU scale), audio is Apple's AAC encoder, and every file is tagged BT.709 in full
-(primaries, transfer and matrix): with only the matrix tag, Chrome showed brand green #00DD94 as #12F994.
+(primaries, transfer and matrix): with only the matrix tag, Chrome showed brand green #00DD94 as #12F994. Masters
+are Rec.709 SDR (1-1-1), limited range, with any HDR or Dolby Vision metadata from phone footage stripped; every
+render report says so in a `color` line, and `juice check` fails a file that says anything else.
 
 ## The agent
 

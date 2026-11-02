@@ -316,7 +316,7 @@ def render(spec: Spec, keep_clips: bool = False, workers: int = 4) -> dict:
                "fx": [f["type"] for f in s.fx]}
               for s, t0, (_, _, d) in zip(spec.shots, starts, parts)]
     report = {"output": str(spec.output), "format": spec.format, "size": [style["width"], style["height"]],
-              "encoder": encode.describe(es),
+              "encoder": encode.describe(es), "color": encode.color_report(spec.output)["summary"],
               "duration_s": round(total, 3), "shots": ranges, "cuts_at": [r["at"] for r in ranges[1:]],
               "layers": [{"type": L.comp, "from": round(L.start, 2), "to": round(L.end, 2)} for L in tl.layers],
               "sfx": [{"at": round(a, 3), "sound": s} for a, s in events]}

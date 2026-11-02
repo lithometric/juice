@@ -393,7 +393,7 @@ class Video:
         shutil.rmtree(tmp, ignore_errors=True)
         report = {"output": str(out), "preview": preview, "size": [round(self.W * scale), round(self.H * scale)],
                   "fps": fps, "frames": n, "workers": len(jobs), "duration_s": round(self.duration, 3),
-                  "encoder": encode.describe(est),
+                  "encoder": encode.describe(est), "color": encode.color_report(out)["summary"],
                   "render_s": round(time.time() - t_start, 1), "video_s": round(t_video, 1),
                   "audio": getattr(self, "audio_report", None)}
         return report

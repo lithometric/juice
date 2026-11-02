@@ -70,16 +70,21 @@ def pix_fmt(style: dict) -> str:
 
 
 TAGS = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+# Phone footage brings HDR context along as frame side data (iPhone: Dolby Vision RPUs, ambient viewing
+# environment; others: mastering display, content light level). An SDR master must not carry any of it: Apple
+# devices and platforms read it as HDR signalling. juice's frames need none of it after the tone map.
+STRIP = "sidedata=mode=delete"
 
 
 def finish_filters(style: dict, rgb_in: bool = False) -> list[str]:
-    """The end of every encode's filter graph: the encoder's pixel format, then BT.709 tags on the frames.
+    """The end of every encode's filter graph: the encoder's pixel format, no leftover HDR side data, then
+    BT.709 tags on the frames.
     ffmpeg 7+ writes the frames' own colour tags and ignores -color_primaries / -color_trc when they say
     "unknown", so without this a master said only "bt709 matrix" and every player guessed the rest
     (QuickTime and Chrome guess differently). rgb_in: the frames are RGB (motion videos), converted here
     with the BT.709 matrix into limited range."""
     conv = ["scale=out_color_matrix=bt709:out_range=tv"] if rgb_in else []
-    return [*conv, f"format={pix_fmt(style)}", TAGS]
+    return [*conv, f"format={pix_fmt(style)}", STRIP, TAGS]
 
 
 def _mode(style: dict | None, env: str, key: str) -> str:
@@ -314,3 +319,101 @@ def decode_args(path: str | Path, style: dict | None = None) -> list[str]:
     """Input options for decoding this source: hardware where it's known to decode correctly, else none.
     Frames come back in system memory, so filters (crop, scale, the HDR LUT, overlays) work unchanged."""
     return list(_decode(str(path), _mode(style, "JUICE_DECODER", "decoder")))
+
+
+# --- what a finished file says about its colour ---------------------------------------------------------
+
+CODES = {"primaries": {1: "bt709", 9: "bt2020", 2: "unspecified"}, "transfer": {1: "bt709", 2: "unspecified", 13: "srgb",
+         14: "bt2020-10", 16: "pq", 18: "hlg"}, "matrix": {1: "bt709", 2: "unspecified", 6: "bt601", 9: "bt2020nc"}}
+HDR_BOXES = {b"dvcC": "Dolby Vision", b"dvvC": "Dolby Vision", b"dvwC": "Dolby Vision", b"mdcv": "HDR mastering display",
+             b"clli": "HDR content light level", b"SmDm": "HDR mastering display", b"CoLL": "HDR content light level",
+             b"amve": "ambient viewing environment"}
+
+
+def _boxes(path: str) -> list[tuple[bytes, bytes]]:
+    """(box type, payload) for the colour-related boxes in an MP4/MOV's video sample entries."""
+    import struct
+    containers = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"}
+    samples = {b"hvc1", b"hev1", b"avc1", b"avc3", b"dvh1", b"dvhe", b"apch", b"apcn", b"ap4h", b"ap4x"}
+    want = {b"colr", b"gama", *HDR_BOXES}
+    data = Path(path).read_bytes()
+    out = []
+
+    def walk(off: int, end: int):
+        while off + 8 <= end:
+            size, typ = struct.unpack(">I4s", data[off:off + 8])
+            hdr = 8
+            if size == 1:
+                size, hdr = struct.unpack(">Q", data[off + 8:off + 16])[0], 16
+            elif size == 0:
+                size = end - off
+            if size < hdr:
+                return
+            body = off + hdr
+            if typ in want:
+                out.append((typ, data[body:off + size]))
+            if typ in containers:
+                walk(body + (8 if typ == b"stsd" else 0), off + size)
+            elif typ in samples:
+                walk(body + 78, off + size)          # the visual sample entry's fixed fields, then its boxes
+            off += size
+    walk(0, len(data))
+    return out
+
+
+def color_report(path: str | Path) -> dict:
+    """What a finished file declares about its colour, in words, and anything wrong for a social upload.
+    juice masters are Rec.709 SDR: BT.709 primaries, transfer and matrix (the 1-1-1 every platform converts
+    to), limited range, in an nclx colr box, with no gamma box and no HDR or Dolby Vision metadata. Resolve's
+    "Rec.709-A" and "gamma 2.4" exports are display tweaks for Apple players, not other codes; juice uses neither."""
+    import struct
+    path = str(path)
+    problems, extra = [], []
+    colr = None
+    for typ, body in _boxes(path):
+        if typ == b"colr" and body[:4] in (b"nclx", b"nclc") and len(body) >= 10:
+            p, t, m = struct.unpack(">HHH", body[4:10])
+            full = bool(body[10] >> 7) if body[:4] == b"nclx" and len(body) > 10 else False
+            colr = (p, t, m, full)
+        elif typ == b"gama":
+            extra.append("gama box (an Apple gamma override)")
+        elif typ in HDR_BOXES:
+            extra.append(HDR_BOXES[typ])
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=codec_name,pix_fmt:stream_side_data=side_data_type", "-of", "json", path],
+                       capture_output=True, text=True)
+    st = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
+    names = {"dovi": "Dolby Vision", "mastering": "HDR mastering display", "content light": "HDR content light level",
+             "ambient": "ambient viewing environment"}
+    f = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#1", "-show_entries",
+                        "frame_side_data=side_data_type", "-of", "json", path], capture_output=True, text=True)
+    first = ((json.loads(f.stdout or "{}").get("frames") or [{}])[0]).get("side_data_list", [])   # in-band (SEI)
+    for sd in st.get("side_data_list", []) + first:
+        kind = sd.get("side_data_type", "").lower()
+        extra += [v for k, v in names.items() if k in kind]
+    bits = "10-bit" if "10" in st.get("pix_fmt", "") else "8-bit"
+    codec = {"hevc": "HEVC", "h264": "H.264", "prores": "ProRes"}.get(st.get("codec_name", ""), st.get("codec_name", "?"))
+    if colr is None:
+        problems.append("no colr box: the file doesn't say its colour space, so each player guesses (Chrome shifted brand colours)")
+        label = "untagged"
+    else:
+        p, t, m, full = colr
+        names = [CODES[k].get(v, str(v)) for k, v in zip(("primaries", "transfer", "matrix"), (p, t, m))]
+        code = f"{p}-{t}-{m}"
+        if (p, t, m) == (1, 1, 1):
+            label = f"Rec.709 SDR ({code})"
+        elif t in (16, 18):
+            label = f"HDR {'PQ' if t == 16 else 'HLG'} ({code})"
+        else:
+            label = f"{'/'.join(names)} ({code})"
+        if (p, t, m) != (1, 1, 1):
+            problems.append(f"colour tags are {code} ({', '.join(names)}), not Rec.709 1-1-1")
+        if full:
+            problems.append("tagged full range; social platforms expect limited (video) range")
+    extra = sorted(set(extra))
+    if extra:
+        problems.append("carries " + ", ".join(extra) + ": an SDR upload should have no HDR or Dolby Vision metadata")
+    rng = "full range" if colr and colr[3] else "limited range"
+    summary = f"{label}, {rng}, {bits} {codec}" + (f"; also {', '.join(extra)}" if extra else "")
+    return {"summary": summary, "colr": f"{colr[0]}-{colr[1]}-{colr[2]}" if colr else None,
+            "range": rng.split()[0], "extra": extra, "problems": problems}

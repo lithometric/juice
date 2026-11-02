@@ -195,3 +195,35 @@ def test_engine_scale_turns_a_rotated_clip_upright(tmp_path):
     cpu = grab([], ["scale=180:320:force_original_aspect_ratio=increase"])
     assert np.abs(eng - cpu).mean() < 6          # same picture, same way up (sideways would be ~40)
     assert any("transpose_vt" in f for f in vf)
+
+
+def test_colour_report_names_the_standard_and_flags_what_platforms_misread(tmp_path):
+    def make(name, *vf, **kw):
+        out = tmp_path / f"{name}.mp4"
+        filters = ",".join(vf) or "null"
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=0.3", "-vf", filters,
+                        "-c:v", "libx265", "-x265-params", kw.get("x265", "log-level=error"), "-tag:v", "hvc1", str(out)], check=True)
+        return encode.color_report(out)
+    ok = make("ok", *encode.finish_filters({"bit_depth": 10, "encoder": "software"}))
+    assert ok["summary"].startswith("Rec.709 SDR (1-1-1), limited range, 10-bit HEVC") and ok["problems"] == []
+    bare = make("bare", "format=yuv420p10le")
+    assert bare["colr"] is None and any("no colr box" in p for p in bare["problems"])
+    hlg = make("hlg", "format=yuv420p10le", "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc")
+    assert hlg["summary"].startswith("HDR HLG (9-18-9)") and any("not Rec.709" in p for p in hlg["problems"])
+
+
+def test_hdr_metadata_from_a_source_never_reaches_the_master(tmp_path):
+    """Phone footage carries HDR context (mastering display, light level, Dolby Vision, ambient viewing); the
+    tone-mapped SDR master must not, or Apple devices and platforms treat it as HDR."""
+    src = tmp_path / "hdr10.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=0.5",
+                    "-vf", "format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
+                    "-c:v", "libx265", "-x265-params", "log-level=error:hdr10=1:master-display=G(13250,34500)B(7500,3000)"
+                    "R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400", str(src)], check=True)
+    assert encode.color_report(src)["extra"]                     # the source really does carry it
+    out = tmp_path / "sdr.mp4"
+    st = {"bit_depth": 10, "encoder": "software"}
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", ",".join(encode.finish_filters(st)),
+                    *encode.video_args(st), str(out)], check=True)
+    rep = encode.color_report(out)
+    assert rep["extra"] == [] and rep["problems"] == [], rep

@@ -7,6 +7,7 @@ import shutil
 
 from PIL import Image
 
+from .. import encode
 from ..media.inspect import filmstrip, frame_at, loudness, probe_duration
 from . import text as textmod
 from .spec import Spec
@@ -42,6 +43,8 @@ def check(spec: Spec) -> dict:
     verify.mkdir()
 
     problems = footage_problems(spec)
+    color = encode.color_report(out)        # what the file tells players and platforms about its colour
+    problems += color["problems"]
     expected = round(spec.duration, 3)
     vdur = probe_duration(out, "v:0")
     adur = probe_duration(out, "a:0")
@@ -105,6 +108,7 @@ def check(spec: Spec) -> dict:
     ret_summary["tips"] = ret["tips"][:4]
 
     report = {"output": str(out), "video_s": vdur, "audio_s": adur, "expected_s": expected, **loud,
+              "color": color["summary"],
               "cuts_at": spec.cut_points(), "hook": hook, "retention": ret_summary, "problems": problems,
               "look_at": [str(verify / "cuts.jpg"), str(verify / "overview.png"), str(verify / "retention.png")]}
     (verify / "report.json").write_text(json.dumps(report, indent=2))
